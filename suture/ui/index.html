@@ -138,16 +138,16 @@
     <p class="sub" id="sub">AI Gate 配置体检与一键修复</p>
   </header>
 
+  <div class="actions">
+    <button class="btn-primary" id="btnCheck">开始检查</button>
+  </div>
+
   <div class="statusbar">
     <div class="dot" id="dot"></div>
     <div class="text">
       <div class="title" id="statusTitle">准备就绪</div>
-      <div class="detail" id="statusDetail">点「开始检查」，先测网关是否正常，再检查本机配置。</div>
+      <div class="detail" id="statusDetail">点「开始检查」，一次验证网关和本机配置。</div>
     </div>
-  </div>
-
-  <div class="actions">
-    <button class="btn-primary" id="btnCheck">开始检查</button>
   </div>
 
   <div id="results"></div>
@@ -365,7 +365,7 @@ async function runFix(h, card, btn) {
 async function check() {
   $("btnCheck").disabled = true;
   $("results").innerHTML = "";
-  setStatus("busy", "正在检查", "阶段一：测试网关连通性…");
+  setStatus("busy", "正在检查", "正在验证网关连通性和本机配置…");
   try {
     const report = await api("/api/check", {});
     const p = report.gateway_probe;
