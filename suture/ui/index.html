@@ -64,12 +64,6 @@
   .statusbar .title { font-weight: 600; }
   .statusbar .detail { color: var(--ink-muted); font-size: 0.86rem; }
 
-  .probe-line {
-    display: flex; align-items: center; gap: 8px;
-    color: var(--ink-muted); font-size: 0.82rem; margin: 0 2px 14px;
-  }
-  .probe-line .dot { width: 7px; height: 7px; }
-
   button {
     font: inherit; border-radius: var(--radius-ctl); padding: 9px 18px;
     cursor: pointer; border: 1px solid transparent; transition: background .12s ease;
@@ -135,7 +129,6 @@
   .result.warn { border-color: var(--warning); background: var(--warning-soft); }
   .result.bad { border-color: var(--danger); background: var(--danger-soft); }
   .foot { color: var(--ink-muted); font-size: 0.8rem; margin-top: 28px; }
-  .hidden { display: none !important; }
 </style>
 </head>
 <body>
@@ -155,11 +148,6 @@
 
   <div class="actions">
     <button class="btn-primary" id="btnCheck">开始检查</button>
-  </div>
-
-  <div class="probe-line hidden" id="probeLine">
-    <div class="dot" id="probeDot"></div>
-    <div id="probeText"></div>
   </div>
 
   <div id="results"></div>
@@ -187,19 +175,24 @@ function setStatus(kind, title, detail) {
   $("statusDetail").textContent = detail || "";
 }
 
-// 阶段一（网关本身通不通）跟阶段二（每个客户端逐一体检，在下面的卡片里）
-// 是同一份报告里前后相接的两件事，不应该一个挂在页面最顶上、一个在下面卡片里，
-// 看起来像两份不相关的东西——所以单独给它一行，紧挨着放在卡片列表上方，
-// 跟卡片一起构成"过程"，跟最上面只讲"结论"的状态条分开。
-function setProbeLine(kind, text) {
-  const line = $("probeLine");
-  if (!text) {
-    line.classList.add("hidden");
-    return;
+// 阶段一（网关本身通不通）跟阶段二（每个客户端逐一体检，在下面的卡片里）是
+// 同一份报告里前后相接的两件事，视觉上也该是同一种"卡片"，不能一个是细文字行、
+// 一个是大卡片——那样即使同一次点击、同一次请求返回，看着也像两份不相关的东西。
+function probeCard(p, gatewayDown) {
+  const card = el("div", "card");
+  const head = el("div");
+  head.style.cssText = "display:flex;align-items:center;gap:10px;margin-bottom:2px";
+  const title = el("h2", null, "网关连通性");
+  title.style.margin = "0";
+  head.appendChild(title);
+  const ok = p.classification === "ok";
+  head.appendChild(el("span", "pill " + (ok ? "ok" : "issue"), ok ? "正常" : "异常"));
+  card.appendChild(head);
+  card.appendChild(el("div", "detail", `${p.detail}（${p.elapsed_ms}ms）`));
+  if (p.classification === "auth_error" && !gatewayDown) {
+    card.appendChild(el("div", "note", "网关返回鉴权错误，这更可能是本地配置的问题，已继续检查本地配置。"));
   }
-  $("probeDot").className = "dot " + kind;
-  $("probeText").textContent = text;
-  line.classList.remove("hidden");
+  return card;
 }
 
 function el(tag, cls, text) {
@@ -372,7 +365,6 @@ async function runFix(h, card, btn) {
 async function check() {
   $("btnCheck").disabled = true;
   $("results").innerHTML = "";
-  setProbeLine(null, "");
   setStatus("busy", "正在检查", "阶段一：测试网关连通性…");
   try {
     const report = await api("/api/check", {});
@@ -381,11 +373,9 @@ async function check() {
       setStatus("warn", "没有探测到支持的客户端", report.message);
       return;
     }
-    const probeKind = p && p.classification === "ok" ? "ok" : "warn";
-    const probeText = p ? `网关自检：${p.detail}（${p.elapsed_ms}ms）` : "";
     if (report.result === "gateway_down") {
       setStatus("bad", "网关侧问题，未检查本机配置", report.message);
-      setProbeLine("bad", probeText);
+      if (p) $("results").appendChild(probeCard(p, true));
       $("results").appendChild(el("div", "result warn", report.message));
       return;
     }
@@ -396,7 +386,7 @@ async function check() {
       no_config: ["warn", "还没配置过"],
     }[report.result] || ["warn", "检查完成"];
     setStatus(summary[0], summary[1], report.message || "");
-    setProbeLine(probeKind, probeText);
+    if (p) $("results").appendChild(probeCard(p, false));
     report.harnesses.forEach((h) => $("results").appendChild(harnessCard(h)));
   } catch (e) {
     setStatus("bad", "检查失败", e.message);
