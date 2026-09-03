@@ -56,7 +56,12 @@ class Sandbox:
         self.project = self._proj.name
         self.profile_path = profile_for(self.server, self._cfg.name)
         self.base_url = base_url_for(self.server)
-        self.env = {"HOME": self.home, "PATH": os.environ.get("PATH", "")}
+        self.env = {"HOME": self.home, "PATH": os.environ.get("PATH", ""),
+                    # 隔离环境里不该真的去调本机装的客户端——那样测试结果会取决于
+                    # 跑测试这台机器上有没有装、登录没登录，而不是取决于被测的逻辑。
+                    # 默认换成一个必然失败的命令（等价于"这台机器上客户端跑不通"），
+                    # 需要验证"自证通过"那条分支的用例自己覆盖这个变量。
+                    "SUTURE_SELFTEST_COMMAND": "python3 -c exit(3)"}
         return self
 
     def __exit__(self, *exc):

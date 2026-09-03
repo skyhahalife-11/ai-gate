@@ -151,11 +151,88 @@ class TestClaudeCodeAdapter(unittest.TestCase):
             conflict = next(f for f in findings if f.key == "auth-multiple-active")
             self.assertFalse(conflict.ok)
             self.assertIn("Token", conflict.detail)
-            self.assertIn("更像是网关签发的 Key", conflict.detail)   # 能从前缀看出谁像真的
+            self.assertIn("更符合网关签发 Key 的特征", conflict.detail)   # 能从前缀看出谁像真的
             self.assertEqual(conflict.fixable, checks.FIXABLE_NO)   # 环境变量，Suture 改不了
 
 
+class TestManagedSettings(unittest.TestCase):
+    """真实反馈：有些用户的机器是公司统一下发配置的（"直连网关"，自己不用填
+    base_url），之前 Suture 只读全局/项目级两层，完全看不到这一层，导致对这些
+    用户来说"探测网关、模型都探测不到"。这里验证新加的 managed-settings.json
+    支持：优先级最高（但真实环境变量还能盖过它）、检测得到、不会被当成可写文件
+    去备份/回滚、跟本地文件冲突时不会提供没有意义的"一键修复"。"""
+
+    def _managed_env(self, sb, path):
+        return dict(sb.env, SUTURE_MANAGED_SETTINGS_PATH=path)
+
+    def test_managed_settings_wins_over_global_and_project(self):
+        with Sandbox() as sb:
+            managed_path = os.path.join(sb.home, "managed-settings.json")
+            write_json(managed_path, {"env": {
+                "ANTHROPIC_BASE_URL": "https://gate.company.internal",
+                "ANTHROPIC_MODEL": "glm-5.3",
+            }})
+            write_json(os.path.join(sb.home, ".claude", "settings.json"),
+                       {"env": {"ANTHROPIC_BASE_URL": "https://stale-old-address"}})
+            env = self._managed_env(sb, managed_path)
+            cfg = ClaudeCodeAdapter().read(env=env, home=sb.home, project_dir=sb.project)
+            self.assertEqual(cfg.field("base_url").value, "https://gate.company.internal")
+            self.assertIn("组织托管配置", cfg.field("base_url").source_layer)
+            self.assertEqual(cfg.field("model").value, "glm-5.3")
+
+    def test_detected_with_only_managed_settings_present(self):
+        # 全新用户,机器是 IT 统一装好的,自己从没碰过 ~/.claude 或者任何环境变量——
+        # 这正是被反馈的场景,detect() 之前会在这种情况下判定"没装这个客户端"。
+        with Sandbox() as sb:
+            managed_path = os.path.join(sb.home, "managed-settings.json")
+            write_json(managed_path, {"env": {"ANTHROPIC_BASE_URL": "https://gate.company.internal"}})
+            env = self._managed_env(sb, managed_path)
+            self.assertTrue(ClaudeCodeAdapter().detect(env=env, home=sb.home, project_dir=sb.project))
+
+    def test_real_env_var_still_beats_managed_settings(self):
+        with Sandbox() as sb:
+            managed_path = os.path.join(sb.home, "managed-settings.json")
+            write_json(managed_path, {"env": {"ANTHROPIC_BASE_URL": "https://gate.company.internal"}})
+            env = dict(self._managed_env(sb, managed_path),
+                       ANTHROPIC_BASE_URL="https://really-exported-in-shell")
+            cfg = ClaudeCodeAdapter().read(env=env, home=sb.home, project_dir=sb.project)
+            self.assertEqual(cfg.field("base_url").value, "https://really-exported-in-shell")
+            self.assertEqual(cfg.field("base_url").source_layer, "环境变量")
+
+    def test_managed_settings_excluded_from_writable_paths(self):
+        # 备份/回滚不该去碰这个文件——它不属于 Suture 能写的范围，权限通常也不够。
+        with Sandbox() as sb:
+            managed_path = os.path.join(sb.home, "managed-settings.json")
+            write_json(managed_path, {"env": {"ANTHROPIC_BASE_URL": "https://gate.company.internal"}})
+            env = self._managed_env(sb, managed_path)
+            a = ClaudeCodeAdapter()
+            cfg = a.read(env=env, home=sb.home, project_dir=sb.project)
+            self.assertNotIn(managed_path, a.writable_paths(cfg))
+
+    def test_conflict_with_managed_layer_has_no_pointless_auto_fix(self):
+        # 本地文件跟托管配置不一样是预期内的（托管配置就是用来压过本地设置的），
+        # 不是"配置冲突"，而且改本地文件也不会让托管配置生效——不该给"一键修复"。
+        with Sandbox() as sb:
+            managed_path = os.path.join(sb.home, "managed-settings.json")
+            write_json(managed_path, {"env": {"ANTHROPIC_BASE_URL": "https://gate.company.internal"}})
+            write_json(os.path.join(sb.home, ".claude", "settings.json"),
+                       {"env": {"ANTHROPIC_BASE_URL": "https://stale-old-address"}})
+            env = self._managed_env(sb, managed_path)
+            cfg = ClaudeCodeAdapter().read(env=env, home=sb.home, project_dir=sb.project)
+            findings = checks.check_layer_consistency(cfg)
+            conflict = next(f for f in findings if f.key == "conflict:base_url")
+            self.assertEqual(conflict.fixable, checks.FIXABLE_NO)
+            self.assertIn("托管配置", conflict.detail)
+
+
 class TestCodexAdapter(unittest.TestCase):
+    def test_self_test_command_is_the_documented_non_interactive_mode(self):
+        """`codex exec` 是官方文档确认过的非交互模式，不是猜的
+        （developers.openai.com/codex/noninteractive）。"""
+        cmd = CodexAdapter().self_test_command()
+        self.assertEqual(cmd[:2], ["codex", "exec"])
+        self.assertIn("--skip-git-repo-check", cmd)
+
     def _write_user(self, sb, extra=""):
         write_text(os.path.join(sb.home, ".codex", "config.toml"),
                    'model = "glm-5.3"\n'
@@ -183,7 +260,7 @@ class TestCodexAdapter(unittest.TestCase):
             findings = checks.check_auth(cfg, real_profile())
             ref = [f for f in findings if f.key == "auth-ref"][0]
             self.assertFalse(ref.ok)
-            self.assertIn("取不到值", ref.detail)
+            self.assertIn("该变量未设置", ref.detail)
 
     def test_untrusted_project_layer_is_ignored_and_flagged(self):
         with Sandbox() as sb:
@@ -195,7 +272,7 @@ class TestCodexAdapter(unittest.TestCase):
             proj = [f for f in cfg.files if f.layer == "项目级配置"][0]
             self.assertFalse(proj.active)
             findings = checks.check_layer_active(cfg)
-            self.assertTrue(any("没有被 Codex 标记为可信" in f.detail for f in findings))
+            self.assertTrue(any("未被 Codex 标记为可信" in f.detail for f in findings))
 
     def test_trusted_project_layer_wins(self):
         with Sandbox() as sb:
@@ -390,14 +467,16 @@ class TestChecks(unittest.TestCase):
             chosen = next(c for c in f.choices if c["label"] == "gpt-5.6-sol")
             self.assertEqual(chosen["value"], "gpt-5.6-sol")   # 单模型 harness，替换后就是它自己
 
-    def test_unconfigured_model_offers_full_gateway_list_not_a_guess(self):
-        """没配置模型名称时，Suture 不该偷偷填探活用的 probe_model 进去——
-        那个模型只是用来测网关活不活着，跟用户想用哪个是两回事。
-        应该把网关支持的完整型号清单摊出来让用户自己选。"""
+    def test_unconfigured_model_is_not_an_error_but_still_offers_the_list(self):
+        """不填模型名不是错误：客户端不填就用它自己的默认模型，照样能用。
+        所以这一项默认判成正常（界面上会收进折叠区，不平铺几十个型号当报错），
+        但候选清单仍然给出来，想指定某个型号的人点开就能选。
+        同时 Suture 不该偷偷填探活用的 probe_model 进去——那个模型只是用来测
+        网关活不活着，跟用户想用哪个是两回事。"""
         with Sandbox() as sb:
             cfg = self._cc(sb)   # 没设 ANTHROPIC_MODEL
             f = checks.check_models(cfg, self.profile)[0]
-            self.assertFalse(f.ok)
+            self.assertTrue(f.ok)
             self.assertEqual(f.fixable, checks.FIXABLE_NO)
             self.assertIsNone(f.fix_value)
             self.assertEqual(f.fix_field, "model")

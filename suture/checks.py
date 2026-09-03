@@ -12,7 +12,7 @@ from typing import Any, Dict, List, Optional, Tuple
 from .harness.base import (
     FIELD_AUTH, FIELD_BASE_URL, FIELD_MODEL, HarnessConfig, mask_secret,
 )
-from .profile import expected_base_url, model_ids, model_index
+from .profile import expected_base_url, expected_base_urls, model_ids, model_index
 
 FIXABLE_YES = "yes"
 FIXABLE_PARTIAL = "partial"
@@ -129,6 +129,16 @@ def check_base_url(cfg: HarnessConfig, profile: Dict[str, Any]) -> Finding:
 
     normalized = cleaned.rstrip("/")
     expected_norm = expected.rstrip("/")
+    # 网关如果登记了不止一个能进的地址（比如另一个专门给某种网络环境/直连用的
+    # 地址），命中其中任意一个都算对，不是只有首选那一个才算——不然会把一个
+    # 本来就有效的入口误判成"地址不对"，然后一键修复还会把它改成不适用这条
+    # 网络路径的首选地址。
+    alternates = {a.rstrip("/") for a in expected_base_urls(profile, cfg.harness_id)[1:]}
+
+    if normalized in alternates:
+        return Finding(key="base_url", label=label, ok=True,
+                       detail="地址和格式都正确（用的是网关登记的另一个可用入口）。",
+                       current_value=value)
 
     if normalized != expected_norm:
         # 常见的两种：多拼了一段 /v1，或者少了 /v1
@@ -183,10 +193,10 @@ def check_auth(cfg: HarnessConfig, profile: Dict[str, Any]) -> List[Finding]:
         elif not cfg.auth_env_resolved:
             out.append(Finding(
                 key="auth-ref", label="鉴权引用", ok=False,
-                detail=f"配置指向 {cfg.auth_env_name}，但这个名字取不到值——"
-                       "配置文件本身看起来没问题，实际发请求时拿不到 Key。",
+                detail=f"配置指向 {cfg.auth_env_name}，但该变量未设置——"
+                       "配置文件本身没有问题，实际发起请求时无法取得 Key。",
                 current_value=cfg.auth_env_name, fixable=FIXABLE_NO,
-                note="需要设置这个环境变量，或者把 Key 存进凭据文件；Suture 不会把 Key 明文写进配置文件"))
+                note="需要设置该环境变量，或将 Key 存入凭据文件；Suture 不会把 Key 明文写入配置文件"))
         else:
             out.append(Finding(
                 key="auth-ref", label="鉴权引用", ok=True,
@@ -199,7 +209,7 @@ def check_auth(cfg: HarnessConfig, profile: Dict[str, Any]) -> List[Finding]:
             out.append(Finding(
                 key="auth", label="鉴权信息", ok=False,
                 detail="没有配置鉴权信息，请求会被网关直接拒绝。", fixable=FIXABLE_NO,
-                note="需要去网关后台生成一个 Key"))
+                note="需要在网关后台生成一个 Key"))
         return out
 
     if has_primary:
@@ -217,7 +227,7 @@ def check_auth(cfg: HarnessConfig, profile: Dict[str, Any]) -> List[Finding]:
             out.append(Finding(
                 key="auth", label="鉴权信息来源", ok=False, detail=why + "。",
                 current_value=mask_secret(value), fixable=FIXABLE_PARTIAL,
-                note="换成正确的 Key 需要自己去网关后台重新生成，Suture 不能代劳"))
+                note="正确的 Key 需要到网关后台重新生成，Suture 无法代为处理"))
         else:
             out.append(Finding(
                 key="auth", label="鉴权信息", ok=True,
@@ -226,9 +236,9 @@ def check_auth(cfg: HarnessConfig, profile: Dict[str, Any]) -> List[Finding]:
     elif extras:
         out.append(Finding(
             key="auth", label="鉴权信息", ok=True,
-            detail=f"没有走 API_KEY/AUTH_TOKEN 这两个专用字段，但通过 {extras[0].source} "
-                   f"设置的 {extras[0].header} 头能当鉴权用。",
-            note="下面单独校验这个头本身的内容"))
+            detail=f"未使用 API_KEY/AUTH_TOKEN 这两个专用字段，但 {extras[0].source} "
+                   f"设置的 {extras[0].header} 头可作为鉴权凭据。",
+            note="下方单独校验该请求头的内容"))
 
     # 平行的自定义头：跟主字段是「都会被发出去」的关系，不是互斥关系，
     # 每一个都要单独校验内容像不像网关签发的 Key。
@@ -240,7 +250,7 @@ def check_auth(cfg: HarnessConfig, profile: Dict[str, Any]) -> List[Finding]:
                 key=f"auth-extra:{extra.header}", label=label, ok=False,
                 detail=f"来自 {extra.source} 的 {extra.header} 头{why}。",
                 current_value=mask_secret(extra.value), fixable=FIXABLE_PARTIAL,
-                note="换成正确的 Key 需要自己去网关后台重新生成，Suture 不能代劳"))
+                note="正确的 Key 需要到网关后台重新生成，Suture 无法代为处理"))
         else:
             out.append(Finding(
                 key=f"auth-extra:{extra.header}", label=label, ok=True,
@@ -250,8 +260,8 @@ def check_auth(cfg: HarnessConfig, profile: Dict[str, Any]) -> List[Finding]:
     if cfg.auth_conflict:
         out.append(Finding(
             key="auth-conflict", label="鉴权字段位置", ok=False,
-            detail=cfg.auth_conflict + "网关两个请求头都认，所以不会直接失败，"
-                   "但两处并存以后改错地方很常见，建议统一到一处。",
+            detail=cfg.auth_conflict + "网关同时接受这两个请求头，不会直接导致失败，"
+                   "但两者并存容易在后续修改时出错，建议统一到一处。",
             fixable=FIXABLE_YES, fix_field=FIELD_AUTH, fix_value=cfg.field(FIELD_AUTH).value,
             suggested_value="只保留一处"))
 
@@ -265,20 +275,20 @@ def check_auth(cfg: HarnessConfig, profile: Dict[str, Any]) -> List[Finding]:
     distinct_values = {v for _, v, _ in active}
     if len(active) > 1 and len(distinct_values) > 1:
         parts = "、".join(f"{src} 里的 {header} 头" for header, _, src in active)
-        detail = (f"{parts} 同时在生效，客户端会把这几个请求头一起发给网关，"
-                  "哪个头网关真正采信，这个场景没有验证过，Suture 不替你猜。")
+        detail = (f"{parts} 同时生效，客户端会将这几个请求头一起发送给网关，"
+                  "尚未验证网关实际采信哪一个，无法据此判断。")
         good = [(h, s) for h, v, s in active if gate_prefix and v.startswith(gate_prefix)]
         bad = [(h, s) for h, v, s in active if gate_prefix and not v.startswith(gate_prefix)]
         if good and bad and len(good) + len(bad) == len(active):
             good_desc = "、".join(f"{h}（{s}）" for h, s in good)
             bad_desc = "、".join(f"{h}（{s}）" for h, s in bad)
-            detail += f"从 Key 前缀能看出来，{good_desc} 更像是网关签发的 Key，{bad_desc} 不是——建议保留前者，删掉后者对应的配置。"
+            detail += f"根据 Key 前缀判断，{good_desc} 更符合网关签发 Key 的特征，{bad_desc} 不符合，建议保留前者、删除后者对应的配置。"
         else:
-            detail += "建议自己确认清楚以后只留一处，删掉其余的。"
+            detail += "建议确认后只保留一处，删除其余配置。"
         out.append(Finding(
             key="auth-multiple-active", label="鉴权信息来源冲突", ok=False, detail=detail,
             fixable=FIXABLE_NO,
-            note="这几处大多是环境变量，不是配置文件里的字段，Suture 不会帮你改环境变量，需要你自己去对应的地方删掉不需要的那个。"))
+            note="这些大多是环境变量，不是配置文件字段；Suture 不会修改环境变量，需要在对应位置手动删除多余的一项"))
 
     return out
 
@@ -307,22 +317,29 @@ def check_protocol_version(cfg: HarnessConfig, profile: Dict[str, Any]) -> List[
 def check_models(cfg: HarnessConfig, profile: Dict[str, Any]) -> List[Finding]:
     known = model_ids(profile)
     index = model_index(profile)
-    candidates = cfg.model_candidates or (
-        [cfg.field(FIELD_MODEL).value] if cfg.field(FIELD_MODEL).is_set else [])
+    # 多模型 harness（比如 DeepSeek）用 model_candidates，没有单独一份「来源」；
+    # 单模型 harness 走 FIELD_MODEL 这个解析结果，本身就带着来自哪一层的信息——
+    # 之前这个来源信息在这里被扔掉了，模型这一项因此是全篇唯一不写"取自哪一层"的，
+    # 这次顺手补上，跟鉴权那几项的呈现方式保持一致。
+    field_rf = cfg.field(FIELD_MODEL)
+    candidates = cfg.model_candidates or ([field_rf.value] if field_rf.is_set else [])
+    source_note = ("取自" + field_rf.source_layer) if (not cfg.model_candidates and field_rf.source_layer) else ""
 
     if not candidates:
+        # 不填模型名不是错误：客户端不填就用它自己的默认模型，很多人（尤其是不需要在
+        # 客户端填任何网关配置的那类用户）从头到尾就没填过，也一直用得好好的。
+        # 之前这里判成 ok=False，等于把一个正常状态报成故障，还把网关全部型号平铺出来，
+        # 对这类用户就是满屏报错。所以默认降级成提示；只有当端到端请求真的没通、
+        # 而且又没指定模型时，engine 那边才会把它升级成需要处理的问题（见 check()）。
         return [Finding(
-            key="model", label="模型名称", ok=False,
-            detail="没有配置模型名称——这跟阶段一探活用的模型是两回事，"
-                   "那个只用来验证网关活不活着，不代表你想用哪个模型，"
-                   "Suture 不知道答案，不会替你选。",
+            key="model", label="模型名称", ok=True,
+            detail="未指定模型名称，不影响使用——未配置时客户端使用其默认模型。",
             fixable=FIXABLE_NO, fix_field=FIELD_MODEL,
-            choices=[{"label": m, "value": m} for m in known],
-            note="从网关支持的型号里选一个")]
+            choices=[{"label": m, "value": m} for m in known])]
 
     out: List[Finding] = []
     for i, name in enumerate(candidates):
-        out.append(_check_one_model(name, known, index, candidates, i))
+        out.append(_check_one_model(name, known, index, candidates, i, source_note))
     return out
 
 
@@ -341,11 +358,12 @@ def _replaced_list(candidates: List[str], position: int, new_value: str) -> str:
 
 
 def _check_one_model(name: str, known: List[str], index: Dict[str, Any],
-                     candidates: List[str], position: int) -> Finding:
+                     candidates: List[str], position: int, source_note: str = "") -> Finding:
     label = "模型名称"
     if name in index:
         return Finding(key=f"model:{name}", label=label, ok=True,
-                       detail=f"「{name}」在网关路由表里能精确匹配。", current_value=name)
+                       detail=f"「{name}」在网关路由表里能精确匹配。", current_value=name,
+                       note=source_note)
 
     # 只把「看起来是打字错误」的差异当成可以自动纠正的：大小写、连字符/点号、空格
     norm = _normalize(name)
@@ -366,8 +384,8 @@ def _check_one_model(name: str, known: List[str], index: Dict[str, Any],
         return Finding(
             key=f"model:{name}", label=label, ok=False,
             detail=f"「{name}」不在网关路由表里。相近的有：{'、'.join(near)}——"
-                   "这些都是各自独立的型号，不是拼写变体，需要你自己确认要用哪一个，"
-                   "自动改会有连错模型的风险。",
+                   "均为独立型号，非拼写变体，需要确认具体使用哪一个；"
+                   "自动替换存在连接到错误模型的风险。",
             current_value=name, suggested_value="、".join(near),
             fixable=FIXABLE_NO, fix_field=FIELD_MODEL,
             choices=[{"label": c, "value": _replaced_list(candidates, position, c)}
@@ -379,14 +397,19 @@ def _check_one_model(name: str, known: List[str], index: Dict[str, Any],
         current_value=name, fixable=FIXABLE_NO, fix_field=FIELD_MODEL,
         choices=[{"label": m, "value": _replaced_list(candidates, position, m)}
                 for m in known],
-        note=f"网关当前提供 {len(known)} 个型号，从下面选一个")
+        note=f"网关当前提供 {len(known)} 个型号，可从列表中选择一个")
 
 
 # ---------- 多层配置取值不一致 ----------
 
 def check_layer_consistency(cfg: HarnessConfig) -> List[Finding]:
     """按已确认的使用规范，项目级/用户层不应该覆盖网关相关配置，
-    出现不一致本身就算配置错误，需要统一到实际生效的值。"""
+    出现不一致本身就算配置错误，需要统一到实际生效的值。
+
+    但如果实际生效的这层是公司统一下发的托管配置，情况就不一样了：本地文件
+    跟它不一样是正常的、甚至是预期内的（托管配置本来就是用来压过本地设置的），
+    不是"配置冲突"；而且不管本地怎么改都不会生效，所以这种情况不提供
+    「一键修复」——那样点了也白点，还会让人误以为改好了。"""
     out: List[Finding] = []
     for key in (FIELD_BASE_URL, FIELD_MODEL):
         rf = cfg.field(key)
@@ -394,13 +417,23 @@ def check_layer_consistency(cfg: HarnessConfig) -> List[Finding]:
         if not differing:
             continue
         others = "；".join(f"{lv.layer} 里是「{lv.value}」" for lv in differing)
+        effective_is_managed = any(lv.managed and lv.effective for lv in rf.layers)
+        if effective_is_managed:
+            out.append(Finding(
+                key=f"conflict:{key}", label="本地设置被组织托管配置覆盖", ok=False,
+                detail=f"实际生效的是{rf.source_layer}里的「{rf.value}」（托管配置优先级最高，"
+                       f"本地设置改不动它）；另外 {others}。",
+                current_value=rf.value, fixable=FIXABLE_NO,
+                note="该值来自组织统一下发的托管配置，本地这一层无论如何修改都不会生效，"
+                     "因此不提供一键修复"))
+            continue
         out.append(Finding(
             key=f"conflict:{key}", label="多层配置取值不一致", ok=False,
             detail=f"同一项在多个地方设置了不同的值：实际生效的是{rf.source_layer}里的"
                    f"「{rf.value}」，另外 {others}。",
             current_value=rf.value, suggested_value=rf.value,
             fixable=FIXABLE_YES, fix_field=key, fix_value=rf.value,
-            note="修复会统一成实际生效的这个值，并且只改实际生效的那一层"))
+            note="修复会将各层统一为当前生效的值，且只修改生效的那一层"))
     return out
 
 

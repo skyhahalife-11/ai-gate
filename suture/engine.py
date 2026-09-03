@@ -10,11 +10,11 @@ import os
 from dataclasses import asdict, dataclass, field
 from typing import Any, Dict, List, Optional
 
-from . import fixer, gateway
+from . import fixer, gateway, selftest
 from .checks import Finding, FIXABLE_NO, FIXABLE_YES, run_all_checks
 from .harness import ALL_ADAPTERS, detect_installed, get_adapter
 from .harness.base import FIELD_AUTH, FIELD_BASE_URL, FIELD_MODEL, HarnessConfig, mask_secret
-from .profile import expected_base_url, load_profile
+from .profile import expected_base_url, expected_base_urls, load_profile
 
 STAGE_GATEWAY = "gateway"
 STAGE_HARNESS = "harness"
@@ -42,6 +42,7 @@ class HarnessReport:
     files: List[Dict[str, Any]] = field(default_factory=list)
     e2e: Optional[Dict[str, Any]] = None            # 兼容旧界面：等于 e2e_results[0]
     e2e_results: List[Dict[str, Any]] = field(default_factory=list)
+    self_test: Optional[Dict[str, Any]] = None      # 客户端自证的结果（只在需要时才做）
     fixable_count: int = 0
     generated_path: str = ""
 
@@ -121,13 +122,33 @@ class Engine:
         """阶段一要回答的是「网关本身活着吗」，所以探的是规则里那个已知正确的地址，
         而不是用户配置里那个可能填错的地址——否则用户把地址填错时，工具会连不上，
         然后判定成「网关侧问题，不要动本地配置」，而真正该修的恰恰就是这个地址。
-        用户配置里的 Key 会带上：拿它探活能顺带看出 Key 本身是不是有效的。"""
+        网关如果登记了不止一个能进的地址（比如某些网络环境专用的直连地址），
+        这里会挨个试：只要有一个地址探活不是网关侧问题（不在 GATEWAY_SIDE 里），
+        就说明网关本身是活的，直接返回那一次的结果；如果全部地址都判定成
+        网关侧问题，返回最后一次的结果（跟原来只测一个地址时的行为一致）。
+        鉴权优先用 profile 里配置好的探活专用 Key（跟用户自己的配置解耦，
+        专门为这件事生成、权限极小，就算用户自己的 Key 没配或配错也不影响
+        判断网关本身活不活）；没配 probe_key 时才退回到原来的行为——带上
+        用户配置里的 Key，或者随便借一个已知能用的 Key。"""
         probe_model = self.profile.get("probe_model")
-        base_url = expected_base_url(self.profile, "claude_code")
         wire = _wire(self.profile, "claude_code")
-        headers = _auth_headers(cfg, fallback_key=self._any_known_key())
-        return gateway.probe_gateway(base_url, headers, probe_model,
-                                     suffix=wire["suffix"], style=wire["style"])
+        probe_key = self.profile.get("probe_key")
+        if probe_key:
+            headers = {"x-api-key": probe_key}
+        else:
+            headers = _auth_headers(cfg, fallback_key=self._any_known_key())
+
+        urls = expected_base_urls(self.profile, "claude_code")
+        if not urls:
+            urls = [expected_base_url(self.profile, "claude_code")]
+
+        result: Optional[gateway.ProbeResult] = None
+        for base_url in urls:
+            result = gateway.probe_gateway(base_url, headers, probe_model,
+                                           suffix=wire["suffix"], style=wire["style"])
+            if result.classification not in gateway.GATEWAY_SIDE:
+                return result
+        return result
 
     def _any_known_key(self) -> Optional[str]:
         """从已经读到的任意一个 harness 配置里取一个 Key 用于探活。"""
@@ -147,6 +168,22 @@ class Engine:
                       "inactive_reason": f.inactive_reason} for f in cfg.files]
 
         if not cfg.has_any_config:
+            # 一个字都没配的机器有两种：真正没配置过的新人，和本来就不需要在客户端
+            # 配的人。所以不能直接说"还没配置过、我帮你生成一份"——对后一种人，生成
+            # 出来的配置会盖掉他现在正常工作的那条路，等于把好的机器弄坏。先让客户端
+            # 自己跑一次，用结果说话。
+            st = selftest.run(adapter.self_test_command(), env=self.env)
+            rep.self_test = {"attempted": st.attempted, "ok": st.ok,
+                             "detail": st.detail, "command": st.command}
+            rep.infos.append(st.detail)
+            if st.ok:
+                rep.result = RESULT_HEALTHY
+                rep.findings = [Finding(
+                    key="external", label="连接方式", ok=True,
+                    detail="客户端未配置任何网关信息，但实测能正常使用；这种情况下不需要"
+                           "在客户端填写网关地址和 Key，为空属于正常状态。",
+                    fixable=FIXABLE_NO)]
+                return rep
             rep.result = RESULT_NO_CONFIG
             return rep
 
@@ -190,8 +227,42 @@ class Engine:
                     f.fixable = FIXABLE_NO
                     f.fix_field = None
                     f.fix_value = None
+                    f.note = ""
                     f.detail += ("（端到端真实请求已经验证当前配置能正常连通网关，可能是走了本地转发/"
                                 "代理，所以没有当成问题处理；如果以后突然连不上了，这里是首先要检查的地方。）")
+
+        # 客户端里压根没填地址、也没填鉴权时，Suture 自己发不出上面那次真实请求
+        # （没有地址可发），所有静态判断只能一路说"没配置"。但"没配置"对一部分用户
+        # 来说是正常状态：他们的连接是在客户端之外解决的（比如公司网络直接把流量接到
+        # 网关），本来就不需要在客户端填这些。区分"不需要配"和"该配却没配"，靠猜是猜
+        # 不出来的，唯一可靠的办法是让客户端自己用它那套配置和凭据跑一次——跑通了，
+        # 这台机器现在就是能用的，那几项不该报成故障；跑不通，才是真的没配置。
+        if not base_url and not cfg.field(FIELD_AUTH).is_set:
+            st = selftest.run(adapter.self_test_command(), env=self.env)
+            rep.self_test = {"attempted": st.attempted, "ok": st.ok,
+                             "detail": st.detail, "command": st.command}
+            rep.infos.append(st.detail)
+            if st.ok:
+                for f in rep.findings:
+                    if not f.ok and f.key in _CONNECTIVITY_FINDING_KEYS:
+                        f.ok = True
+                        f.fixable = FIXABLE_NO
+                        f.fix_field = None
+                        f.fix_value = None
+                        f.note = ""
+                        f.detail = "客户端实测能正常使用，不需要填写这一项，为空属于正常状态。"
+
+        # 反过来的一种情况：没指定模型本身不是错（checks 那边默认按提示处理），
+        # 但如果端到端请求确实没跑通、而且又没指定模型，那「客户端默认的模型名网关不认」
+        # 就是一个真实的可能原因，这时候才把它升级成需要处理的问题，并把型号清单摆出来。
+        # 没发过端到端请求（比如根本没配地址）不算证据，不升级——不能因为「没试过」
+        # 就判定人家有问题。
+        if rep.e2e_results and not any(r["ok"] for r in rep.e2e_results):
+            for f in rep.findings:
+                if f.key == "model" and f.ok and f.choices:
+                    f.ok = False
+                    f.detail = "端到端请求未成功，且未指定模型名称，可能是默认模型名不被网关识别。"
+                    f.note = "可从网关支持的型号中选择一个"
 
         issues = [f for f in rep.findings if not f.ok]
         rep.fixable_count = len([f for f in issues if f.fixable == FIXABLE_YES])
@@ -212,7 +283,7 @@ class Engine:
         # 那一项列出网关支持的完整型号清单，让用户自己选。
         return adapter.generate_minimal_config(
             base_url=expected_base_url(self.profile, harness_id),
-            model="把这里换成你要用的模型名称（检查结果里会列出网关支持的型号）",
+            model="请替换为要使用的模型名称（检查结果中会列出网关支持的型号）",
             env=self.env, home=self.home, project_dir=self.project_dir)
 
     def apply_choice(self, harness_id: str, field: str, value: str) -> Dict[str, Any]:
@@ -248,7 +319,7 @@ class Engine:
         except OSError as exc:
             # 写入失败必须如实上报，不能显示修复成功但其实什么都没改
             return {"result": RESULT_MANUAL, "applied": [], "steps": steps,
-                    "message": f"写入配置失败：{exc}。原配置没有被改动，备份在 {manifest.directory}。"}
+                    "message": f"写入配置失败：{exc}。原配置未被修改，备份保存在 {manifest.directory}。"}
         steps.append({"step": "write", "detail": "；".join(applied) if applied else "没有需要写入的改动"})
 
         # 用修正后的配置重发真实请求
@@ -264,7 +335,7 @@ class Engine:
         if retest.ok:
             return {"result": RESULT_FIXED, "applied": applied, "steps": steps,
                     "retest": _probe_dict(retest), "backup_dir": manifest.directory,
-                    "message": "修复成功。如果当前已经开着这个客户端，需要重新打开一下才会生效。"}
+                    "message": "修复成功。如果客户端当前正在运行，需要重新启动才能生效。"}
 
         # 重发仍失败：补测网关自检做归因，而不是直接判定修复没生效
         reprobe = self.probe(cfg2)
@@ -272,20 +343,20 @@ class Engine:
             return {"result": RESULT_KEPT_FIX, "applied": applied, "steps": steps,
                     "retest": _probe_dict(retest), "reprobe": _probe_dict(reprobe),
                     "backup_dir": manifest.directory,
-                    "message": "配置已经改好，但目前连不上是网关那边的问题，不是这次修复导致的。"
-                               "这次修复保留，没有回滚。"}
+                    "message": "配置已修改完成，但当前连接失败是网关侧问题，与本次修复无关。"
+                               "本次修复予以保留，不做回滚。"}
 
         failed = fixer.rollback(manifest)
         if failed:
             return {"result": RESULT_ROLLED_BACK, "applied": applied, "steps": steps,
                     "retest": _probe_dict(retest), "reprobe": _probe_dict(reprobe),
                     "backup_dir": manifest.directory, "rollback_failed": failed,
-                    "message": f"这次修复没有解决问题，回滚时以下文件写回失败，需要人工检查：{failed}"}
+                    "message": f"本次修复未能解决问题，回滚时以下文件写入失败，需要人工检查：{failed}"}
         return {"result": RESULT_ROLLED_BACK, "applied": applied, "steps": steps,
                 "retest": _probe_dict(retest), "reprobe": _probe_dict(reprobe),
                 "backup_dir": manifest.directory,
-                "message": "网关自检正常，但用修正后的配置仍然连不上：这次修复没有解决问题，"
-                           "已经回滚到修复前的配置，建议联系研发进一步排查。"}
+                "message": "网关自检正常，但使用修正后的配置仍无法连接：本次修复未能解决问题，"
+                           "已回滚至修复前的配置，建议联系研发进一步排查。"}
 
     # ---- 完整一轮 ----
     def run(self, harness_ids: Optional[List[str]] = None) -> Report:
@@ -294,8 +365,8 @@ class Engine:
         adapters = ([get_adapter(h) for h in harness_ids] if harness_ids else self.installed())
         if not adapters:
             report.result = RESULT_NO_HARNESS
-            report.message = ("没有探测到 Claude Code CLI、Codex CLI 或 DeepSeek Harness。"
-                              "如果你用的是别的客户端，这一期还没有覆盖。")
+            report.message = ("未探测到 Claude Code CLI、Codex CLI 或 DeepSeek Harness。"
+                              "如果使用的是其他客户端，当前版本尚未覆盖。")
             return report
 
         # 阶段一：用其中一个已配置的 harness 去探活，网关状态对所有 harness 是同一件事
@@ -310,8 +381,7 @@ class Engine:
 
         if probe.classification in gateway.GATEWAY_SIDE:
             report.result = RESULT_GATEWAY_DOWN
-            report.message = ("判定为网关侧问题，不会去动本地配置。建议联系网关值班同学，"
-                              "或者稍后重试。")
+            report.message = "判定为网关侧问题，不会修改本地配置。建议联系网关值班人员，或稍后重试。"
             return report
 
         # 阶段二：逐个 harness 体检，分别出结论，不合并成一份笼统的报告
@@ -320,15 +390,16 @@ class Engine:
 
         if any(h.result == RESULT_ISSUES for h in report.harnesses):
             report.result = RESULT_ISSUES
+            report.message = "发现可以自动修复的问题，详见下方各项。"
         elif all(h.result == RESULT_NO_CONFIG for h in report.harnesses):
             report.result = RESULT_NO_CONFIG
-            report.message = "没有找到任何配置。这不是配错了，是还没配置过——可以直接生成一份最小配置。"
+            report.message = "未找到任何配置，这不属于配置错误，而是尚未配置——可以直接生成一份最小配置。"
         elif any(h.result == RESULT_MANUAL for h in report.harnesses):
             report.result = RESULT_MANUAL
-            report.message = "发现的问题里没有能自动修复的，需要人工处理。"
+            report.message = "发现的问题均无法自动修复，需要人工处理。"
         else:
             report.result = RESULT_HEALTHY
-            report.message = "检查全部通过，请求也跑通了。如果还是用不了，问题可能不在客户端配置。"
+            report.message = "检查全部通过，请求已验证可用。如果仍无法使用，问题可能不在客户端配置。"
         return report
 
 

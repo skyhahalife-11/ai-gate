@@ -60,9 +60,15 @@
   .dot.busy { background: var(--accent); animation: pulse 1.1s ease-in-out infinite; }
   @keyframes pulse { 0%,100% { opacity: 1; } 50% { opacity: .35; } }
   @media (prefers-reduced-motion: reduce) { .dot.busy { animation: none; } }
-  .statusbar .text { flex: 1; }
+  .statusbar .text { flex: 1; min-width: 0; }
   .statusbar .title { font-weight: 600; }
   .statusbar .detail { color: var(--ink-muted); font-size: 0.86rem; }
+
+  .probe-line {
+    display: flex; align-items: center; gap: 8px;
+    color: var(--ink-muted); font-size: 0.82rem; margin: 0 2px 14px;
+  }
+  .probe-line .dot { width: 7px; height: 7px; }
 
   button {
     font: inherit; border-radius: var(--radius-ctl); padding: 9px 18px;
@@ -73,11 +79,17 @@
   .btn-primary:not(:disabled):hover { background: var(--accent-hover); }
   .btn-secondary { background: transparent; color: var(--ink); border-color: var(--border); }
   .btn-secondary:not(:disabled):hover { background: var(--surface-alt); }
-  .btn-choice {
-    background: var(--accent-soft); color: var(--accent-hover);
-    border-color: var(--accent-soft); padding: 6px 14px; font-size: 0.86rem;
+  .choice-list {
+    display: flex; flex-direction: column; gap: 1px; margin-top: 8px;
+    max-height: 220px; overflow-y: auto; border: 1px solid var(--border);
+    border-radius: var(--radius-ctl); background: var(--border);
   }
-  .btn-choice:not(:disabled):hover { background: var(--accent); color: #fff; }
+  .btn-choice-row {
+    display: block; width: 100%; text-align: left; border-radius: 0;
+    background: var(--surface); color: var(--ink);
+    padding: 8px 14px; font-size: 0.86rem; border-color: transparent;
+  }
+  .btn-choice-row:not(:disabled):hover { background: var(--accent-soft); color: var(--accent-hover); }
   button:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
   .actions { display: flex; gap: 10px; flex-wrap: wrap; margin-bottom: 24px; }
 
@@ -117,6 +129,7 @@
   .result {
     margin-top: 16px; padding: 14px 16px; border-radius: var(--radius-ctl);
     border-left: 3px solid var(--accent); background: var(--accent-soft);
+    white-space: pre-line;
   }
   .result.ok { border-color: var(--success); background: var(--success-soft); }
   .result.warn { border-color: var(--warning); background: var(--warning-soft); }
@@ -142,7 +155,11 @@
 
   <div class="actions">
     <button class="btn-primary" id="btnCheck">开始检查</button>
-    <button class="btn-secondary hidden" id="btnRecheck">重新检查</button>
+  </div>
+
+  <div class="probe-line hidden" id="probeLine">
+    <div class="dot" id="probeDot"></div>
+    <div id="probeText"></div>
   </div>
 
   <div id="results"></div>
@@ -168,6 +185,21 @@ function setStatus(kind, title, detail) {
   $("dot").className = "dot " + kind;
   $("statusTitle").textContent = title;
   $("statusDetail").textContent = detail || "";
+}
+
+// 阶段一（网关本身通不通）跟阶段二（每个客户端逐一体检，在下面的卡片里）
+// 是同一份报告里前后相接的两件事，不应该一个挂在页面最顶上、一个在下面卡片里，
+// 看起来像两份不相关的东西——所以单独给它一行，紧挨着放在卡片列表上方，
+// 跟卡片一起构成"过程"，跟最上面只讲"结论"的状态条分开。
+function setProbeLine(kind, text) {
+  const line = $("probeLine");
+  if (!text) {
+    line.classList.add("hidden");
+    return;
+  }
+  $("probeDot").className = "dot " + kind;
+  $("probeText").textContent = text;
+  line.classList.remove("hidden");
 }
 
 function el(tag, cls, text) {
@@ -198,11 +230,13 @@ function findingRow(f, harnessId, card) {
   if (f.note) body.appendChild(el("div", "note", f.note));
   // 有候选值、但 Suture 不该替用户挑的场景：摆成一排可以点的选项，
   // 不是自动填、也不是纯文字——点哪个才写哪个。
-  if (!f.ok && f.choices && f.choices.length && f.fix_field) {
-    const menu = el("div", "choice-menu");
-    menu.style.cssText = "display:flex;flex-wrap:wrap;gap:8px;margin-top:8px";
+  // 已经判定正常、但仍然给了候选值的项（比如「没指定模型，不填也能用」），菜单照样渲染，
+  // 只不过这一项本身待在「另外 N 项检查通过」的折叠区里，默认收起——想指定的人点开再选，
+  // 不会一上来就把几十个型号平铺在报告里当成报错。
+  if (f.choices && f.choices.length && f.fix_field) {
+    const menu = el("div", "choice-list");
     f.choices.forEach((c) => {
-      const btn = el("button", "btn-choice", c.label);
+      const btn = el("button", "btn-choice-row", c.label);
       btn.type = "button";
       btn.onclick = () => applyChoice(harnessId, f.fix_field, c.value, btn, menu, card);
       menu.appendChild(btn);
@@ -229,7 +263,6 @@ async function applyChoice(harnessId, field, value, btn, menu, card) {
       { fixed: "已应用", kept_fix: "已应用（保留）", rolled_back: "已回滚" }[r.result] || "已处理",
       r.message);
     menu.remove();
-    $("btnRecheck").classList.remove("hidden");
   } catch (e) {
     card.appendChild(el("div", "result bad", e.message));
     Array.from(menu.children).forEach((b) => (b.disabled = false));
@@ -267,14 +300,19 @@ function harnessCard(h) {
     card.appendChild(el("div", "detail", "没有找到任何配置——这不是配错了，是还没配置过。"));
     const btn = el("button", "btn-primary", "帮我生成一份配置");
     btn.style.marginTop = "12px";
+    const originalLabel = btn.textContent;
     btn.onclick = async () => {
       btn.disabled = true;
+      btn.textContent = "正在生成…";
       try {
         const r = await api("/api/generate", { harness_id: h.harness_id });
-        const box = el("div", "result ok", `已生成：${r.path}\n把里面的 Key 换成网关后台生成的真实值就能用了。`);
+        const box = el("div", "result ok", `已生成：${r.path}\n请将其中的 Key 替换为网关后台生成的真实值。`);
         card.appendChild(box);
+        btn.remove();
       } catch (e) {
         card.appendChild(el("div", "result bad", e.message));
+        btn.disabled = false;
+        btn.textContent = originalLabel;
       }
     };
     card.appendChild(btn);
@@ -324,7 +362,6 @@ async function runFix(h, card, btn) {
       { fixed: "修复成功", kept_fix: "修复已保留", rolled_back: "已回滚" }[r.result] || "修复结束",
       r.message);
     btn.remove();
-    $("btnRecheck").classList.remove("hidden");
   } catch (e) {
     card.appendChild(el("div", "result bad", e.message));
     btn.disabled = false;
@@ -335,6 +372,7 @@ async function runFix(h, card, btn) {
 async function check() {
   $("btnCheck").disabled = true;
   $("results").innerHTML = "";
+  setProbeLine(null, "");
   setStatus("busy", "正在检查", "阶段一：测试网关连通性…");
   try {
     const report = await api("/api/check", {});
@@ -343,8 +381,11 @@ async function check() {
       setStatus("warn", "没有探测到支持的客户端", report.message);
       return;
     }
+    const probeKind = p && p.classification === "ok" ? "ok" : "warn";
+    const probeText = p ? `网关自检：${p.detail}（${p.elapsed_ms}ms）` : "";
     if (report.result === "gateway_down") {
-      setStatus("bad", "网关侧问题", `${p.detail} —— ${report.message}`);
+      setStatus("bad", "网关侧问题，未检查本机配置", report.message);
+      setProbeLine("bad", probeText);
       $("results").appendChild(el("div", "result warn", report.message));
       return;
     }
@@ -354,19 +395,18 @@ async function check() {
       manual: ["warn", "需要人工处理"],
       no_config: ["warn", "还没配置过"],
     }[report.result] || ["warn", "检查完成"];
-    setStatus(summary[0], summary[1],
-      `网关自检：${p.detail}（${p.elapsed_ms}ms）${report.message ? " · " + report.message : ""}`);
+    setStatus(summary[0], summary[1], report.message || "");
+    setProbeLine(probeKind, probeText);
     report.harnesses.forEach((h) => $("results").appendChild(harnessCard(h)));
-    $("btnRecheck").classList.remove("hidden");
   } catch (e) {
     setStatus("bad", "检查失败", e.message);
   } finally {
     $("btnCheck").disabled = false;
+    $("btnCheck").textContent = "重新检查";
   }
 }
 
 $("btnCheck").onclick = check;
-$("btnRecheck").onclick = check;
 
 api("/api/state").then((s) => {
   $("sub").textContent =

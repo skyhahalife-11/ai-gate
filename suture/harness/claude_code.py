@@ -1,7 +1,14 @@
 """Claude Code CLI 适配器。
 
-配置载体：环境变量 + 全局 ~/.claude/settings.json + 项目级 <项目>/.claude/settings.json
-优先级：环境变量 > 项目级配置 > 全局配置
+配置载体：环境变量 + 组织托管配置（managed-settings.json，路径按系统固定）
+        + 全局 ~/.claude/settings.json + 项目级 <项目>/.claude/settings.json
+优先级：环境变量 > 组织托管配置 > 项目级配置 > 全局配置
+托管配置是公司通过 IT/MDM 统一下发到机器上的，用户自己看不到也不会去改，
+通常也没有写权限——这也是有些用户"从来不用自己填网关地址"的真实原因。
+Suture 只读这个文件，绝不写入，也不会把它算进备份/回滚的范围。
+（管理员还可能用 macOS 配置描述文件或 claude.ai 控制台下发同样的配置，
+这两种不落地成本机文件，Suture 读不到；这种情况下要看 `claude` 里
+`/status` 显示的 `Setting sources` 来确认实际生效值。）
 鉴权：值直接存在配置里；填在 ANTHROPIC_API_KEY 走 x-api-key 头，
       填在 ANTHROPIC_AUTH_TOKEN 走 Authorization 头。
       另外 ANTHROPIC_CUSTOM_HEADERS（`Name: Value`，多头换行分隔）是平行的第三条通路：
@@ -13,6 +20,7 @@ from __future__ import annotations
 
 import json
 import os
+import sys
 from typing import Any, Dict, List, Optional, Tuple
 
 from .base import (
@@ -50,6 +58,27 @@ def _global_path(home: str) -> str:
 
 def _project_path(project_dir: str) -> str:
     return os.path.join(project_dir, ".claude", "settings.json")
+
+
+ENV_MANAGED_PATH_OVERRIDE = "SUTURE_MANAGED_SETTINGS_PATH"     # 仅测试/特殊部署用
+
+
+def _managed_path(env: Optional[Dict[str, str]] = None) -> str:
+    """公司统一下发的托管配置——优先级压过用户和项目级的一切设置。用户自己
+    不会去改这个文件（通常也没有写权限，是 IT/MDM 推送到机器上的），Suture
+    只读不写。这也是有些用户"不用自己填 base_url"的真实原因：地址是从这里
+    下发的，不在用户看得到、Suture 原来会去读的那两层里。
+    路径按操作系统固定，来自官方文档，不是猜的；测试或者部署路径特殊时
+    (比如 WSL) 可以用 SUTURE_MANAGED_SETTINGS_PATH 覆盖，不用改代码。"""
+    env = env if env is not None else os.environ
+    override = env.get(ENV_MANAGED_PATH_OVERRIDE)
+    if override:
+        return override
+    if sys.platform == "win32":
+        return r"C:\Program Files\ClaudeCode\managed-settings.json"
+    if sys.platform == "darwin":
+        return "/Library/Application Support/ClaudeCode/managed-settings.json"
+    return "/etc/claude-code/managed-settings.json"
 
 
 def _read_json_file(layer: str, path: str, known_keys: List[str]) -> FileState:
@@ -92,6 +121,8 @@ class ClaudeCodeAdapter(HarnessAdapter):
             return True
         if os.path.isdir(os.path.join(home, ".claude")):
             return True
+        if os.path.exists(_managed_path(env)):
+            return True
         return os.path.exists(_project_path(project_dir))
 
     def read(self, env=None, home=None, project_dir=None, known_keys=None,
@@ -103,24 +134,27 @@ class ClaudeCodeAdapter(HarnessAdapter):
         accepted_headers = accepted_headers or []
         accepted_lower = {h.lower() for h in accepted_headers}
 
+        m = _read_json_file("组织托管配置（IT 统一下发，只读）", _managed_path(env), known_keys)
         g = _read_json_file("全局配置", _global_path(home), known_keys)
         p = _read_json_file("项目级配置", _project_path(project_dir), known_keys)
         cfg = HarnessConfig(harness_id=self.harness_id, display_name=self.display_name,
-                            files=[g, p])
+                            files=[m, g, p])
 
         def env_block(fs: FileState) -> Dict[str, Any]:
             block = fs.data.get("env")
             return block if isinstance(block, dict) else {}
 
         def layers_for(var: str) -> List[LayerValue]:
-            # 优先级从高到低：环境变量 > 项目级 > 全局
+            # 优先级从高到低：环境变量 > 组织托管配置 > 项目级 > 全局。
+            # 托管配置压过用户和项目级的一切设置，这是官方文档写明的规则，不是猜的；
+            # 它比全局/项目级两层都高，但一个真实存在的环境变量还是能盖过它。
             out = []
             if env.get(var):
                 out.append(LayerValue("环境变量", "", str(env[var])))
-            for fs in (p, g):
+            for fs in (m, p, g):
                 v = env_block(fs).get(var)
                 if v:
-                    out.append(LayerValue(fs.layer, fs.path, str(v)))
+                    out.append(LayerValue(fs.layer, fs.path, str(v), managed=(fs is m)))
             return out
 
         cfg.fields[FIELD_BASE_URL] = build_resolved(FIELD_BASE_URL, layers_for(ENV_BASE_URL))
@@ -164,7 +198,9 @@ class ClaudeCodeAdapter(HarnessAdapter):
         return cfg
 
     def writable_paths(self, cfg: HarnessConfig) -> List[str]:
-        return [fs.path for fs in cfg.files]
+        # 托管配置只读，不备份也不回滚它——那个文件不属于 Suture 能写的范围，
+        # 备份/回滚流程如果把它也算进去，权限不够时会白白报一个失败。
+        return [fs.path for fs in cfg.files if fs.layer != "组织托管配置（IT 统一下发，只读）"]
 
     def _target_file(self, cfg: HarnessConfig) -> FileState:
         """写到实际生效的那一层。按已确认的使用规范，项目级不应该覆盖全局，
@@ -201,6 +237,12 @@ class ClaudeCodeAdapter(HarnessAdapter):
             f.write("\n")
         return described
 
+    def self_test_command(self) -> Optional[List[str]]:
+        """`claude -p "..."` 是官方的非交互（print）模式：跑完就退出，不进交互界面。
+        故意不带 --model：整个自证的意义就在于让客户端用它自己那一套解析结果，
+        Suture 不往里塞任何东西。"""
+        return ["claude", "-p", "hi"]
+
     def generate_minimal_config(self, base_url: str, model: str,
                                 env=None, home=None, project_dir=None) -> str:
         env = env if env is not None else os.environ
@@ -210,7 +252,7 @@ class ClaudeCodeAdapter(HarnessAdapter):
         data = {
             "env": {
                 ENV_BASE_URL: base_url,
-                ENV_API_KEY: "把这里换成网关后台生成的 Key",
+                ENV_API_KEY: "请替换为网关后台生成的 Key",
                 ENV_MODEL: model,
             }
         }

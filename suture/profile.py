@@ -49,8 +49,21 @@ def model_index(profile: Dict[str, Any]) -> Dict[str, Dict[str, Any]]:
 
 
 def expected_base_url(profile: Dict[str, Any], harness_id: str) -> str:
-    """不同 harness 拼请求路径的习惯不同，正确的 base_url 也就不同。"""
+    """不同 harness 拼请求路径的习惯不同，正确的 base_url 也就不同。
+    这个只返回「首选」那一个地址（用来生成配置、给一键修复用），
+    如果网关不止一个能进的地址，用 expected_base_urls（复数）拿全部。"""
     b = profile.get("base_url", {})
     root = b.get("canonical_root", "").rstrip("/")
     suffix = b.get("per_harness_suffix", {}).get(harness_id, "")
     return root + suffix
+
+
+def expected_base_urls(profile: Dict[str, Any], harness_id: str) -> list:
+    """网关登记的全部能进的地址（首选 + 其它同样有效的入口，比如某些网络环境下
+    专用的直连地址），都按这个 harness 拼路径的习惯加上后缀。列表第一个永远是
+    首选地址——阶段一探活按顺序试，阶段二检查用户填的地址时命中列表里任意
+    一个都算对，不是必须严格等于第一个。"""
+    b = profile.get("base_url", {})
+    suffix = b.get("per_harness_suffix", {}).get(harness_id, "")
+    roots = [b.get("canonical_root", "")] + list(b.get("alternate_roots", []) or [])
+    return [r.rstrip("/") + suffix for r in roots if r]

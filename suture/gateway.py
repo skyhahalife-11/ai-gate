@@ -46,19 +46,19 @@ def _classify(status: Optional[int], exc: Optional[BaseException]) -> tuple:
         if isinstance(exc, socket.timeout) or isinstance(exc, TimeoutError):
             return "timeout", "请求超时，网关没有在预期时间内响应。"
         if isinstance(exc, urllib.error.URLError):
-            return "network_error", f"连不上网关，本机网络或代理可能有问题：{exc.reason}"
+            return "network_error", f"无法连接网关，可能是本机网络或代理存在问题：{exc.reason}"
         return "unknown", f"请求出错：{exc}"
     if status is None:
-        return "unknown", "没有拿到响应状态。"
+        return "unknown", "未获取到响应状态。"
     if 200 <= status < 300:
         return "ok", "请求正常返回。"
     if status in (401, 403):
         return "auth_error", f"网关返回 {status}，鉴权被拒绝。"
     if status == 429:
-        return "rate_limited", f"网关返回 {status}，被限流了。"
+        return "rate_limited", f"网关返回 {status}，请求被限流。"
     if 500 <= status < 600:
-        return "server_error", f"网关返回 {status}，网关侧出错。"
-    return "unknown", f"网关返回了未归类的状态码 {status}。"
+        return "server_error", f"网关返回 {status}，网关侧发生错误。"
+    return "unknown", f"网关返回未归类的状态码 {status}。"
 
 
 def _send(base_url: str, auth_headers: Dict[str, str], model: str,

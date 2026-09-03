@@ -104,8 +104,8 @@ class CodexAdapter(HarnessAdapter):
             p.active = trusted
             if not trusted:
                 p.inactive_reason = (
-                    "这个项目没有被 Codex 标记为可信，项目级 .codex/config.toml 会被整个跳过，"
-                    "实际生效的是用户级配置。改这个文件不会有任何效果。"
+                    "该项目未被 Codex 标记为可信，项目级 .codex/config.toml 将被整体跳过，"
+                    "实际生效的是用户级配置；修改此文件不会生效。"
                 )
 
         active_files = [f for f in (p, u) if f.exists and f.parse_ok and f.active]
@@ -192,6 +192,13 @@ class CodexAdapter(HarnessAdapter):
         with open(target.path, "w", encoding="utf-8") as f:
             f.write(text)
         return described
+
+    def self_test_command(self) -> Optional[List[str]]:
+        """`codex exec` 是官方的非交互模式（已核实，developers.openai.com/codex/
+        noninteractive）。加 --skip-git-repo-check 是因为这个自证可能在非 git 目录下
+        跑（比如项目目录没初始化 git），不加的话会因为目录不是 git 仓库而失败，
+        跟网关通不通没关系，会污染自证结果。默认是只读沙箱，不需要额外加权限。"""
+        return ["codex", "exec", "--skip-git-repo-check", "hi"]
 
     def generate_minimal_config(self, base_url: str, model: str,
                                 env=None, home=None, project_dir=None) -> str:

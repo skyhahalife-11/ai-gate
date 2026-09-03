@@ -23,6 +23,7 @@ class LayerValue:
     path: str           # 来源文件路径；环境变量层为空字符串
     value: str
     effective: bool = False   # 是不是实际生效的那一层
+    managed: bool = False     # 是不是公司统一下发、用户自己改不了的那一层（跟哪个 harness 无关）
 
 
 @dataclass
@@ -134,6 +135,14 @@ class HarnessAdapter:
                                 env=None, home=None, project_dir=None) -> str:
         """全新用户从零生成一份最小可用配置，返回写入的文件路径。"""
         raise NotImplementedError
+
+    def self_test_command(self) -> Optional[List[str]]:
+        """让这个客户端自己跑一次最小的非交互请求，用它自己解析出来的配置和凭据。
+        用在「客户端里什么都没配，但可能本来就不需要配」这种场景上：Suture 自己
+        没有地址可发请求，只能让客户端自证。返回 None 表示这个客户端还没有确认过
+        可用的非交互调用方式——那就不做自证，宁可不测，也不去猜一个命令行参数
+        然后把失败当成"这台机器有问题"。"""
+        return None
 
 
 # ---- 各适配器共用的小工具 ----

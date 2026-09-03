@@ -43,7 +43,7 @@ class TestWriteFailure(unittest.TestCase):
         import inspect
         src = inspect.getsource(E.Engine.fix)
         self.assertIn("写入配置失败", src)
-        self.assertIn("原配置没有被改动", src)
+        self.assertIn("原配置未被修改", src)
 
 
 class TestProfileHandling(unittest.TestCase):

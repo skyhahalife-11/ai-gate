@@ -82,7 +82,7 @@ def run(argv: Optional[List[str]] = None) -> int:
             if not args.no_fix:
                 path = eng.generate_config(h.harness_id)
                 print(f"  已生成一份最小配置：{path}")
-                print("  把里面的 Key 换成网关后台生成的真实值就能用了。")
+                print("  请将其中的 Key 替换为网关后台生成的真实值。")
             print()
             continue
 

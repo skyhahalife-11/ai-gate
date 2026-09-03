@@ -287,7 +287,7 @@ class DeepSeekHarnessAdapter(HarnessAdapter):
         creds = os.path.join(hh, ".credentials.yaml")
         if not os.path.exists(creds):
             with open(creds, "w", encoding="utf-8") as f:
-                f.write(yaml.dump({"version": 1, "refs": {"AI_GATE_API_KEY": "把这里换成网关后台生成的 Key"}}))
+                f.write(yaml.dump({"version": 1, "refs": {"AI_GATE_API_KEY": "请替换为网关后台生成的 Key"}}))
             try:
                 os.chmod(creds, 0o600)
             except OSError:

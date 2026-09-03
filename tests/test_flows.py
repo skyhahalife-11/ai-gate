@@ -3,9 +3,11 @@ from __future__ import annotations
 
 import json
 import os
+import tempfile
 import unittest
 
-from tests.helpers import Sandbox, write_json, write_text
+from tests.helpers import Sandbox, real_profile, write_json, write_text
+from mock_gateway import base_url_for, start_server
 
 from suture import engine as E
 from suture.engine import Engine
@@ -55,7 +57,7 @@ class TestFixSuccess(unittest.TestCase):
             after = json.load(open(cc_settings(sb), encoding="utf-8"))["env"]
             self.assertEqual(after["ANTHROPIC_BASE_URL"], sb.base_url)
             self.assertEqual(after["ANTHROPIC_MODEL"], "glm-5.3")
-            self.assertIn("重新打开", result["message"])
+            self.assertIn("重新启动", result["message"])
 
             self.assertEqual(make_engine(sb).run(["claude_code"]).result, E.RESULT_HEALTHY)
 
@@ -137,7 +139,7 @@ class TestAttribution(unittest.TestCase):
             h = eng.run(["claude_code"]).harnesses[0]
             result = eng.fix("claude_code", h.findings)
             self.assertEqual(result["result"], E.RESULT_KEPT_FIX, result.get("message"))
-            self.assertIn("不是这次修复导致的", result["message"])
+            self.assertIn("与本次修复无关", result["message"])
             after = json.load(open(cc_settings(sb), encoding="utf-8"))["env"]
             self.assertEqual(after["ANTHROPIC_BASE_URL"], sb.base_url)
 
@@ -207,7 +209,7 @@ class TestMultiHarness(unittest.TestCase):
         with Sandbox() as sb:
             report = make_engine(sb).run()
             self.assertEqual(report.result, E.RESULT_NO_HARNESS)
-            self.assertIn("还没有覆盖", report.message)
+            self.assertIn("当前版本尚未覆盖", report.message)
 
 
 class TestCodexFlow(unittest.TestCase):
@@ -306,6 +308,198 @@ class TestPhaseOneTargetsTheGatewayItself(unittest.TestCase):
             }})
             report = make_engine(sb).run(["claude_code"])
             self.assertEqual(report.result, E.RESULT_GATEWAY_DOWN)
+
+
+class TestAlternateGatewayAddresses(unittest.TestCase):
+    """有些用户是走网关登记的另一个可用入口（比如某种直连方式），不是
+    canonical_root 那一个。阶段一应该挨个试所有登记的地址，有一个通就够；
+    阶段二检查用户填的地址时，填的是登记的任意一个也该算对。"""
+
+    def _engine(self, profile_path, home, project):
+        return Engine(profile_path=profile_path,
+                      env={"HOME": home, "PATH": os.environ.get("PATH", "")},
+                      home=home, project_dir=project)
+
+    def test_phase_one_succeeds_via_alternate_when_canonical_is_down(self):
+        bad = start_server(default_behavior="server_error")
+        good = start_server(default_behavior="ok")
+        try:
+            with tempfile.TemporaryDirectory() as home, \
+                 tempfile.TemporaryDirectory() as project, \
+                 tempfile.TemporaryDirectory() as cfgdir:
+                profile = real_profile()
+                profile["base_url"]["canonical_root"] = base_url_for(bad)
+                profile["base_url"]["alternate_roots"] = [base_url_for(good)]
+                profile["base_url"]["require_https"] = False
+                profile_path = os.path.join(cfgdir, "profile.json")
+                write_json(profile_path, profile)
+
+                write_json(os.path.join(home, ".claude", "settings.json"), {"env": {
+                    "ANTHROPIC_BASE_URL": base_url_for(good),   # 用户填的是那个「直连」地址
+                    "ANTHROPIC_API_KEY": "yotta_pk_valid1234",
+                    "ANTHROPIC_MODEL": "glm-5.3",
+                }})
+                report = self._engine(profile_path, home, project).run(["claude_code"])
+                self.assertEqual(report.gateway_probe["classification"], "ok")
+                self.assertNotEqual(report.result, E.RESULT_GATEWAY_DOWN,
+                                    "登记的另一个地址是活的，不该判成网关侧问题")
+                h = report.harnesses[0]
+                base_finding = next(f for f in h.findings if f.label == "网关地址")
+                self.assertTrue(base_finding.ok, base_finding.detail)
+                self.assertIn("另一个可用入口", base_finding.detail)
+        finally:
+            bad.shutdown()
+            good.shutdown()
+
+    def test_all_registered_addresses_down_is_still_gateway_down(self):
+        bad1 = start_server(default_behavior="server_error")
+        bad2 = start_server(default_behavior="server_error")
+        try:
+            with tempfile.TemporaryDirectory() as home, \
+                 tempfile.TemporaryDirectory() as project, \
+                 tempfile.TemporaryDirectory() as cfgdir:
+                profile = real_profile()
+                profile["base_url"]["canonical_root"] = base_url_for(bad1)
+                profile["base_url"]["alternate_roots"] = [base_url_for(bad2)]
+                profile["base_url"]["require_https"] = False
+                profile_path = os.path.join(cfgdir, "profile.json")
+                write_json(profile_path, profile)
+
+                write_json(os.path.join(home, ".claude", "settings.json"), {"env": {
+                    "ANTHROPIC_BASE_URL": base_url_for(bad1),
+                    "ANTHROPIC_API_KEY": "yotta_pk_valid1234",
+                    "ANTHROPIC_MODEL": "glm-5.3",
+                }})
+                report = self._engine(profile_path, home, project).run(["claude_code"])
+                self.assertEqual(report.result, E.RESULT_GATEWAY_DOWN,
+                                 "登记的地址全部都连不上，才应该判成网关侧问题")
+        finally:
+            bad1.shutdown()
+            bad2.shutdown()
+
+
+# 测试环境里没有真实客户端可调，用 SUTURE_SELFTEST_COMMAND 换成一个行为可控的命令。
+# 注意这串会经过 shlex.split，别写引号。
+OK_SELFTEST = "python3 -c print(1)"          # 退出码 0 且有输出 = 自证通过
+BAD_SELFTEST = "python3 -c exit(3)"          # 非零退出 = 自证失败
+
+
+class TestClientSelfTest(unittest.TestCase):
+    """真实场景：有的同事客户端里什么都没填——地址、Key 都没有——但一直用得好好的，
+    因为连接是在客户端之外解决的（公司网络直接把流量接到网关）。这种机器上 Suture
+    自己发不出真实请求，静态检查只能一路说"没配置"，把正常状态报成满屏故障。
+    做法是让客户端自己跑一次：跑通了就不该报错，跑不通才是真的没配置。"""
+
+    def test_nothing_configured_but_client_works_is_healthy(self):
+        with Sandbox() as sb:
+            # 复刻那台机器：配置文件存在，但里面没有任何网关配置
+            write_json(cc_settings(sb), {"includeCoAuthoredBy": True})
+            report = make_engine(sb, SUTURE_SELFTEST_COMMAND=OK_SELFTEST).run(["claude_code"])
+            h = report.harnesses[0]
+            self.assertTrue(h.self_test["ok"])
+            self.assertEqual(h.result, E.RESULT_HEALTHY, [f.label for f in h.findings if not f.ok])
+            self.assertEqual(h.fixable_count, 0, "不能去改一套正在正常工作的配置")
+            for key in ("base_url", "auth"):
+                f = next((f for f in h.findings if f.key == key), None)
+                if f is not None:
+                    self.assertTrue(f.ok, f"{f.label} 不该报成故障：{f.detail}")
+                    self.assertIn("不需要填写这一项", f.detail)
+
+    def test_nothing_configured_and_client_broken_still_reports_missing_config(self):
+        with Sandbox() as sb:
+            write_json(cc_settings(sb), {"includeCoAuthoredBy": True})
+            report = make_engine(sb, SUTURE_SELFTEST_COMMAND=BAD_SELFTEST).run(["claude_code"])
+            h = report.harnesses[0]
+            self.assertFalse(h.self_test["ok"])
+            labels = [f.label for f in h.findings if not f.ok]
+            self.assertIn("网关地址", labels)
+            self.assertIn("鉴权信息", labels)
+
+    def test_empty_machine_that_works_is_not_told_to_generate_a_config(self):
+        """连配置文件都没有、但客户端实测能用：不能提示"还没配置过、帮你生成一份"——
+        生成出来的配置会盖掉他现在正常工作的那条路。"""
+        with Sandbox() as sb:
+            rep = make_engine(sb, SUTURE_SELFTEST_COMMAND=OK_SELFTEST).check("claude_code")
+            self.assertEqual(rep.result, E.RESULT_HEALTHY)
+            self.assertTrue(any("不需要在客户端填" in f.detail for f in rep.findings))
+
+    def test_empty_machine_that_does_not_work_is_still_a_fresh_user(self):
+        with Sandbox() as sb:
+            rep = make_engine(sb, SUTURE_SELFTEST_COMMAND=BAD_SELFTEST).check("claude_code")
+            self.assertEqual(rep.result, E.RESULT_NO_CONFIG)
+
+    def test_configured_machine_does_not_pay_for_a_self_test(self):
+        """已经配好地址和 Key 的机器，Suture 自己那次真实请求信息更多（能分清是地址
+        错还是 Key 错），不需要再额外调用一次客户端，也不该多花一次真实调用的钱。"""
+        with Sandbox() as sb:
+            write_json(cc_settings(sb), {"env": {
+                "ANTHROPIC_BASE_URL": sb.base_url,
+                "ANTHROPIC_API_KEY": "yotta_pk_valid1234",
+                "ANTHROPIC_MODEL": "glm-5.3",
+            }})
+            h = make_engine(sb, SUTURE_SELFTEST_COMMAND=OK_SELFTEST).run(["claude_code"]).harnesses[0]
+            self.assertIsNone(h.self_test)
+            self.assertEqual(h.result, E.RESULT_HEALTHY)
+
+
+class TestUnconfiguredModelIsNotReportedAsBroken(unittest.TestCase):
+    """真实反馈：有的同事根本不需要在客户端填模型名（不填就用客户端自己的默认模型），
+    但 Suture 把这一项报成「问题」，还平铺出网关全部型号，看上去像一屏报错。
+    不填不是错，只有在端到端确实没跑通、又没指定模型时，才值得提示去指定一个。"""
+
+    def test_no_model_configured_but_working_is_not_an_issue(self):
+        with Sandbox() as sb:
+            write_json(cc_settings(sb), {"env": {
+                "ANTHROPIC_BASE_URL": sb.base_url,
+                "ANTHROPIC_API_KEY": "yotta_pk_valid1234",
+                # 故意不设 ANTHROPIC_MODEL
+            }})
+            h = make_engine(sb).run(["claude_code"]).harnesses[0]
+            model_findings = [f for f in h.findings if f.key == "model"]
+            self.assertTrue(model_findings, "模型这一项应该仍然出现在报告里")
+            f = model_findings[0]
+            self.assertTrue(f.ok, f"不填模型不该被当成问题：{f.detail}")
+            self.assertTrue(f.choices, "想指定型号的人仍然要能从清单里选")
+            self.assertNotIn("model", [i.key for i in h.findings if not i.ok])
+
+    def test_no_model_and_request_failed_escalates_to_an_issue(self):
+        """端到端确实没通、又没指定模型：这时候「默认模型名网关不认」是真实可能的原因，
+        才把这一项升级成需要处理的问题，并摆出型号清单。"""
+        with Sandbox(behavior="auth_error") as sb:
+            write_json(cc_settings(sb), {"env": {
+                "ANTHROPIC_BASE_URL": sb.base_url,
+                "ANTHROPIC_API_KEY": "yotta_pk_valid1234",
+            }})
+            h = make_engine(sb).run(["claude_code"]).harnesses[0]
+            f = next(f for f in h.findings if f.key == "model")
+            self.assertFalse(f.ok)
+            self.assertTrue(f.choices)
+
+
+class TestProbeKeyDecoupling(unittest.TestCase):
+    """阶段一探活用 profile 里配置好的专用 Key，跟用户自己有没有配置解耦——
+    全新用户什么都还没配的时候，探活也应该能正确反映网关本身是活的，
+    而不是显示成一个鉴权错误，让人误以为网关有问题。"""
+
+    def test_probe_key_makes_fresh_user_probe_report_ok(self):
+        with Sandbox() as sb:
+            profile = json.load(open(sb.profile_path, encoding="utf-8"))
+            profile["probe_key"] = "yotta_pk_probe_only"
+            write_json(sb.profile_path, profile)
+
+            report = make_engine(sb).run(["claude_code"])   # 全新用户，什么都没配置
+            self.assertEqual(report.gateway_probe["classification"], "ok")
+            self.assertEqual(report.result, E.RESULT_NO_CONFIG)
+
+    def test_without_probe_key_fresh_user_falls_back_to_borrowing_and_shows_auth_error(self):
+        with Sandbox() as sb:
+            # profile 里 probe_key 留空（默认值），退回原来的行为：
+            # 全新用户没有任何 Key 可借，探活会显示鉴权错误——
+            # 不算错，但容易让人误以为网关有问题，这正是 probe_key 要解决的。
+            report = make_engine(sb).run(["claude_code"])
+            self.assertEqual(report.gateway_probe["classification"], "auth_error")
+            self.assertNotEqual(report.result, E.RESULT_GATEWAY_DOWN,
+                                "鉴权错误不属于网关侧问题分类，不会因此被挡在阶段二之前")
 
 
 class TestCustomHeaderAuthEndToEnd(unittest.TestCase):
