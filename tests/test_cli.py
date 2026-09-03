@@ -7,19 +7,19 @@ import subprocess
 import sys
 import unittest
 
-from tests.helpers import ROOT, Sandbox, write_json
+from tests.helpers import ROOT, Sandbox, subprocess_env, write_json
 from tests.test_flows import cc_settings
 
 
 def run_cli(sb, *args, env_extra=None):
-    env = {"PATH": os.environ.get("PATH", ""), "HOME": sb.home,
-           "PYTHONIOENCODING": "utf-8", "NO_COLOR": "1"}
+    env = subprocess_env(HOME=sb.home, PYTHONIOENCODING="utf-8", NO_COLOR="1")
     env.update(env_extra or {})
     return subprocess.run(
         [sys.executable, os.path.join(ROOT, "main.py"), "--cli",
          "--profile", sb.profile_path, "--home", sb.home,
          "--project-dir", sb.project, *args],
-        cwd=sb.project, env=env, capture_output=True, text=True, timeout=60)
+        cwd=sb.project, env=env, capture_output=True, text=True, encoding="utf-8",
+        timeout=60)
 
 
 class TestCli(unittest.TestCase):
@@ -86,8 +86,8 @@ class TestCli(unittest.TestCase):
                 "launch(profile_path=%r, project_dir=%r, open_ui=False)\n"
             ) % (ROOT, sb.profile_path, sb.project)
             r = subprocess.run([sys.executable, "-c", code], capture_output=True,
-                               text=True, timeout=30,
-                               env={"PATH": os.environ.get("PATH", ""), "HOME": sb.home})
+                               text=True, encoding="utf-8", timeout=60,
+                               env=subprocess_env(HOME=sb.home))
             self.assertEqual(r.returncode, 0, r.stderr)
             self.assertIn("http://127.0.0.1:", r.stdout)
             self.assertIn("token=", r.stdout)

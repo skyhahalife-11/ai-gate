@@ -41,6 +41,20 @@ def write_text(path: str, text: str) -> None:
         f.write(text)
 
 
+def subprocess_env(**overrides) -> dict:
+    """给要 subprocess.run 的子进程拼一份隔离环境。
+    Windows 上 socket()/ThreadingHTTPServer 需要能找到 SystemRoot 才能初始化
+    Winsock 服务提供者，环境剥得太干净会直接报 WinError 10106。"""
+    env = {"PATH": os.environ.get("PATH", "")}
+    if os.name == "nt":
+        for key in ("SystemRoot", "windir", "TEMP", "TMP", "COMSPEC"):
+            val = os.environ.get(key)
+            if val:
+                env[key] = val
+    env.update(overrides)
+    return env
+
+
 class Sandbox:
     """一次测试用的隔离环境：独立的 HOME、项目目录和假网关。"""
 

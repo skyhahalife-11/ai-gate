@@ -1,6 +1,7 @@
 """单元层面的验收：YAML 子集读写、掩码、多层解析、各检测项的判断。"""
 from __future__ import annotations
 
+import json
 import os
 import unittest
 
@@ -276,7 +277,9 @@ class TestCodexAdapter(unittest.TestCase):
 
     def test_trusted_project_layer_wins(self):
         with Sandbox() as sb:
-            self._write_user(sb, extra=f'\n[projects."{sb.project}"]\ntrust_level = "trusted"\n')
+            # TOML 基本字符串里反斜杠是转义符，Windows 路径必须转义后再塞进去，
+            # 否则 "C:\Users\..." 会被当成非法/错误的转义序列，表里的项目路径对不上。
+            self._write_user(sb, extra=f'\n[projects.{json.dumps(sb.project)}]\ntrust_level = "trusted"\n')
             write_text(os.path.join(sb.project, ".codex", "config.toml"), 'model = "kimi-k3"\n')
             cfg = CodexAdapter().read(env=sb.env, home=sb.home, project_dir=sb.project)
             self.assertEqual(cfg.field("model").value, "kimi-k3")

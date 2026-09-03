@@ -76,8 +76,9 @@ class TestFixSuccess(unittest.TestCase):
             self.assertTrue(os.path.isdir(backup_dir))
             saved = [os.path.join(backup_dir, n) for n in os.listdir(backup_dir)]
             self.assertTrue(any(open(p, encoding="utf-8").read() == before for p in saved))
-            for p in saved:      # 备份里有 Key 明文，权限必须收紧
-                self.assertEqual(oct(os.stat(p).st_mode)[-3:], "600")
+            if os.name != "nt":  # Windows 的 os.chmod 不支持 POSIX 权限位，收紧不到 600
+                for p in saved:      # 备份里有 Key 明文，权限必须收紧
+                    self.assertEqual(oct(os.stat(p).st_mode)[-3:], "600")
 
 
 class TestGatewayDown(unittest.TestCase):
@@ -182,7 +183,8 @@ class TestFreshUser(unittest.TestCase):
             make_engine(sb).generate_config("deepseek")
             creds = os.path.join(sb.home, ".dsh", ".credentials.yaml")
             self.assertTrue(os.path.exists(creds))
-            self.assertEqual(oct(os.stat(creds).st_mode)[-3:], "600")
+            if os.name != "nt":  # Windows 的 os.chmod 不支持 POSIX 权限位，收紧不到 600
+                self.assertEqual(oct(os.stat(creds).st_mode)[-3:], "600")
 
 
 class TestMultiHarness(unittest.TestCase):
