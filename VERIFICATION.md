@@ -226,6 +226,33 @@
     改成 Authorization（codex 本来就会发的头），同一个 codex 自动变可修。
     新增 tests/test_codex_contract.py 验收。
 
+## 2026-09-09（同日）三路专项审查 + 修复
+
+对「可达性 / UI 可读性 / 跨模块一致与安全」做了三路只读审查，逐条对照源码核验后确认并修掉
+的问题（新增 `tests/test_review_fixes.py`，并对两处受语义影响的既有断言做了更新）：
+
+| 类别 | 确认的问题 | 修法 |
+|---|---|---|
+| 可达性 | codex 缺 base_url（没发过 e2e）时绕过「外部处理」、先给 auto 修地址——配完才冒出 401 | 契约不可达短路与 e2e 解耦：hint≠网关侧即给单条 `auth-incompatible` 外部说明 |
+| 可达性 | 生效值来自系统环境变量（claude 的 ANTHROPIC_BASE_URL/MODEL）时，auto 写配置不生效；conflict 的 auto 还会把错误值复制回文件——两条按钮互相否定、原地循环 | blocked 阶段统一把这类 base_url/model 问题换成一条「去系统环境变量改/删」的外部说明，去掉 conflict 与 fallback 的自动修复 |
+| 可达性 | 型号在快照里但网关实际 400/404、且地址本就正确 → 给「改成规范地址」的 no-op 循环 | 地址正确时改给 `model-unrouted` 外部说明 |
+| 可达性 | `/api/action` 不回写 `last_report` → 修复暴露的下一层 issue 一点必 409，多步修复链断 | action 成功后把最新 client 写回 last_report（与 recheck/configure 对齐） |
+| 一致/安全 | `probe_key` 被硬编码塞 x-api-key，而网关只认 profile 声明的头 | 探活按 `auth.required_header` 放 Key |
+| 一致/安全 | claude_code 写出的含 Key 配置文件不收紧权限 | 写后 chmod 600，与 deepseek / 备份文件口径一致 |
+| 一致/安全 | store_key / apply 写失败时报「原配置未改动」不实（可能已部分写入） | 失败分支真调用 `fixer.rollback` 并按结果如实措辞 |
+| 一致/安全 | `configure_client` 对已有配置整文件覆盖且无备份 | 已有配置时拒绝重配（只服务「装了但一行没配」），引导回检查页按原因修 |
+| 一致/安全 | `detect_binary` 不收 engine.home，按目录判装的基准与 read 不一致 | 签名加 `home` 参数并全链路传透 |
+| UI | 空 Key 点保存崩出英文 TypeError、按钮变「重试」；后端 manual 响应不带 client 时前端重建卡片崩溃 | 本地中文拦截 + manual 响应只追加提示、不重建卡片、按钮恢复原文案 |
+| UI | 安装命令失败/缺 Node 的错误输出被随后的 `renderInstall` 整列表清空，用户看不到原因 | 先 reloadState+renderInstall 再写输出区与结果横幅 |
+| UI | 安装页用启动时缓存、无刷新入口；DeepSeek 引导里引用的「重新探测」按钮不存在 | 切到安装页时重新探测；引导文案改为真实存在的操作 |
+| UI | 单卡修绿后顶部总览仍旧是上一轮「部分无法连接」 | 按当前卡片状态就地重算总览（`recomputeOverview`） |
+| UI | 配置文件语法错这类 `none` 项没有任何「下一步」 | 给 none 项补「按提示处理完后点开始检查」微文案 |
+
+**评审明确「不改语义、文档化」的边界**（供产品侧再定，勿当漏网）：检查页「有配置即走真实
+请求」、安装页按可执行文件判装——配置存在但 PATH 找不到可执行文件时两页口径不同属预期
+（deepseek 已按目录判装对齐；claude/codex 的 PATH 探测边界保留）；「未指定模型时用探活模型
+证明传输/鉴权通即判 connected」也保留——推翻它等于退回到要求人人配模型的旧语义。
+
 ## 还没验证的
 
 - 六个平台里只在 Linux x64 上实际打包并运行过；其余五个需要在对应机器上跑一次构建。

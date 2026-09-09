@@ -205,6 +205,14 @@ class TestFreshUserConfigure(unittest.TestCase):
 class TestCodexFlow(unittest.TestCase):
     def test_fix_writes_user_layer_when_project_untrusted(self):
         with Sandbox() as sb:
+            # 真实规则要求 Token 头、codex 带不了 → 契约不可达、一律外部处理，
+            # 不会有 base_url 修复（见 test_codex_contract）。这里要单独验证「项目
+            # 不可信 → 修复写用户层、不碰项目」这条写路径，就把规则改成网关认
+            # Authorization 头——codex 本来就会发这个头，于是可修、可走到写配置。
+            profile = json.load(open(sb.profile_path, encoding="utf-8"))
+            profile["auth"] = dict(profile["auth"], required_header="Authorization")
+            with open(sb.profile_path, "w", encoding="utf-8") as f:
+                json.dump(profile, f, ensure_ascii=False)
             user_cfg = os.path.join(sb.home, ".codex", "config.toml")
             write_text(user_cfg,
                        'model = "glm-5.3"\nmodel_provider = "ai-gate"\n\n'

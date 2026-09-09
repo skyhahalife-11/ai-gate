@@ -262,6 +262,12 @@ class ClaudeCodeAdapter(HarnessAdapter):
         with open(target.path, "w", encoding="utf-8") as f:
             json.dump(data, f, ensure_ascii=False, indent=2)
             f.write("\n")
+        try:
+            # 这份文件现在可能带着 Key 明文（env 块 / ANTHROPIC_CUSTOM_HEADERS），
+            # 收紧权限，跟 DeepSeek 的凭据文件口径一致。
+            os.chmod(target.path, 0o600)
+        except OSError:
+            pass
         return described
 
     def self_test_command(self) -> Optional[List[str]]:
@@ -307,4 +313,8 @@ class ClaudeCodeAdapter(HarnessAdapter):
         with open(path, "w", encoding="utf-8") as f:
             json.dump(data, f, ensure_ascii=False, indent=2)
             f.write("\n")
+        try:
+            os.chmod(path, 0o600)
+        except OSError:
+            pass
         return path

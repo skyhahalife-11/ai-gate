@@ -105,7 +105,12 @@ python3 -m unittest discover -s tests -t .
   `/chat/completions` 的拼法是对的；Codex 连不上 AI Gate 只差在它带不了 Token 头。
 - **AI Gate 只从 `Token` 请求头读 Key，而 Codex 无法携带自定义请求头——Codex 现状连不上 AI Gate（均已实测）。** anthropic（`/v1/messages`）与 openai（`/v1/chat/completions`）两种形态都只认 Token 头；OpenAI 形态路由存在且可用，Codex 的 base_url 拼法（root + `/v1` + `/chat/completions`）是对的。但 Codex CLI 没有可附加自定义请求头的位置，只会把 Key 放进 `Authorization: Bearer` → 一律 401「个人apikey认证失败」。所以 Suture 对 Codex 给「外部处理」说明（改用 Claude Code / DeepSeek，或等网关放开其它头），不引导它填 Key / 补头。Claude Code 靠 `ANTHROPIC_CUSTOM_HEADERS` 带 Token；DeepSeek 写在路由的 `headers.Token`（Suture 存 Key / 补头都写这里）。网关采信哪个头由 `gateway_profile.json` 的 `auth.required_header` 声明，改了它判定自动跟着变。
 - **型号清单没有可拉的端点，目前靠内置快照。** GET `/v1/models`、`/models`、`/v1/model/list` 等对真实网关都返回 404，`profile.py` 的运行时拉取接口也尚未接通（预留）。模型表更新仍走「改 `gateway_profile.json` + 重新分发」，网关哪天提供型号端点，接上 `fetch_remote_profile()` 就能活拉。
-- **DeepSeek Harness 的二进制探测看配置目录，不看 PATH。** 实测本机 `~/.dsh` 存在但 PATH 里没有 `dsh` 命令，所以 `binary_name` 留空、`detect()` 按目录判「已安装」——这比按命令探测可靠（按命令会误报「未安装」）。代价是「没装却留了空配置目录」这种边角会被当成已装，可接受。
+- **Claude Code 的地址/模型若来自系统环境变量，Suture 只给外部指引。** 系统环境变量
+  `ANTHROPIC_BASE_URL` / `ANTHROPIC_MODEL` 优先级压过配置文件，而 Suture 只写配置文件、
+  改不到你的环境变量——这种配置连不上时不给「一键修复」（写了不生效、旧逻辑还会把
+  环境变量里的错误值复制回文件造成原地循环），而是明确告诉你去「系统设置 → 环境变量」
+  里改或删对应变量再重试。
+- **DeepSeek Harness 的二进制探测看配置目录，不看 PATH。** 实测本机 `~/.dsh` 存在但 PATH 里没有 `dsh` 命令，所以 `binary_name` 留空、`detect()` 按目录判「已安装」——这比按命令探测可靠（按命令会误报「未安装」）。代价是「没装却留了空配置目录」这种边角会被当成已装，可接受。检查页与安装页的判装已用同一套依据（`detect_binary` 也看目录），不会再出现一个页面说已装、另一个说未装。
 - **DeepSeek Harness 还没确认可自动执行的官方安装命令 / 非交互自证方式。** 装与测
   相关能力对它是给引导而不是自动执行；确认了正确命令后补齐即可，不用改其它逻辑。
 - **签名尚未接入。** macOS 不签名 + 不公证的话 Gatekeeper 会直接拦截，非技术用户打不开；

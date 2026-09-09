@@ -302,6 +302,11 @@ function issueRow(client, issue) {
   row.appendChild(el("div", "idetail", issue.detail || ""));
   const ctl = actionControl(client, issue);
   if (ctl) row.appendChild(ctl);
+  else if (issue.repair_kind === "none") {
+    // 只能在工具外处理、又没有按钮的项（比如配置文件格式错）：给明确的下一步，
+    // 别让用户干看着一条说明不知道接下来干嘛
+    row.appendChild(el("div", "note", "按上面的提示处理完后，点顶部「开始检查」重新验证。"));
+  }
   return row;
 }
 
@@ -361,6 +366,7 @@ function cardBody(client) {
 function clientCard(client) {
   const card = el("section", "card client");
   card.dataset.client = client.client_id;
+  card.dataset.state = client.state;   // 供修复后本地重算顶部总览
   const head = el("div", "chead");
   head.appendChild(el("span", "cname", client.display_name));
   const p = statePill(client);
@@ -392,20 +398,39 @@ function findIssueButton(card, issueId) {
     .find((n) => n.dataset.issue === issueId) || null;
 }
 
-async function actFix(card, clientId, issueId, getValue) {
+async function actFix(card, clientId, issueId, act, getValue) {
+  const host = () => findClientHost(clientId) || card;
   const btn = findIssueButton(card, issueId);
-  if (btn) { btn.disabled = true; btn.textContent = "处理中…"; }
+  const label = btn ? btn.textContent : "保存";
+  const setBusy = (busy) => {
+    if (!btn) return;
+    btn.disabled = busy;
+    btn.textContent = busy ? "处理中…" : label;
+  };
   let value;
-  try { value = getValue ? getValue() : undefined; } catch (e) { value = undefined; }
+  try { value = getValue ? getValue() : undefined; } catch (_) { value = undefined; }
+  if (act === "input" && !value) {
+    // 空 Key 不该发出去——本地先拦，给中文提示而不是把请求打给后端
+    host().appendChild(el("div", "result bad", "请先输入 Key。"));
+    return;
+  }
+  setBusy(true);
   try {
     const r = await api("/api/action", { client_id: clientId, issue_id: issueId, value });
-    const msg = el("div", "result " + (r.result === "fixed" ? "ok" : (r.result === "changed" ? "warn" : "bad")),
-                   r.message);
-    placeClient(r.client, msg);
+    const cls = r.result === "fixed" ? "ok" : (r.result === "changed" ? "warn" : "bad");
+    const msg = el("div", "result " + cls, r.message);
+    if (r.client) {
+      placeClient(r.client, msg);
+      recomputeOverview();
+    } else {
+      // manual / 说明类响应（如"请先输入 Key"）不重建卡片：把提示加进去，
+      // 恢复按钮原文案，避免卡片崩溃或按钮被改成「重试」
+      host().appendChild(msg);
+      setBusy(false);
+    }
   } catch (e) {
-    const host = findClientHost(clientId);
-    if (host) host.appendChild(el("div", "result bad", e.message));
-    if (btn) { btn.disabled = false; btn.textContent = "重试"; }
+    host().appendChild(el("div", "result bad", e.message));
+    setBusy(false);
   }
 }
 
@@ -447,6 +472,7 @@ $("results").addEventListener("click", async (ev) => {
       const cls = r.client && r.client.state === "connected" ? "ok" : "warn";
       const msg = r.message + (r.path ? "\n配置写入：" + r.path : "");
       placeClient(r.client, el("div", "result " + cls, msg));
+      recomputeOverview();
     } catch (e) {
       card.appendChild(el("div", "result bad", e.message));
       actEl.disabled = false; actEl.textContent = "保存并测试";
@@ -468,8 +494,22 @@ $("results").addEventListener("click", async (ev) => {
       return v;
     };
   }
-  actFix(card, clientId, issueId, getValue);
+  actFix(card, clientId, issueId, act, getValue);
 });
+
+// 顶部总览结论只在该次整轮 check 时算一次；用户逐卡修复/配置后单卡状态变了，
+// 顶部还留着上一轮的「部分无法连接」会跟全绿的卡片打架。这里按当前卡片状态
+// 就地重算一句，跟每张卡一致。
+function recomputeOverview() {
+  const cards = Array.from($("results").querySelectorAll(".client"));
+  if (!cards.length) return;
+  const has = (s) => cards.some((c) => c.dataset.state === s);
+  let kind = "ok", title = "所有客户端均可正常连接 AI Gate。";
+  if (has("blocked")) { kind = "bad"; title = "还有客户端无法连接 AI Gate，请按卡片上的原因继续处理。"; }
+  else if (has("unconfigured")) { kind = "warn"; title = "客户端已就绪，还差配置连接 AI Gate。"; }
+  else if (has("not_installed")) { kind = "warn"; title = "还有客户端未安装，可在「安装 / 上手」页安装。"; }
+  setStatus(kind, title);
+}
 
 async function runCheck() {
   const btn = $("btnCheck");
@@ -495,13 +535,18 @@ $("btnCheck").addEventListener("click", runCheck);
 
 /* ---------------- Tab 切换 ---------------- */
 
-function switchTab(name) {
+async function switchTab(name) {
   const check = name === "check";
   $("tabBtnCheck").classList.toggle("active", check);
   $("tabBtnInstall").classList.toggle("active", !check);
   $("panelCheck").classList.toggle("active", check);
   $("panelInstall").classList.toggle("active", !check);
-  if (!check) renderInstall();
+  if (!check) {
+    // 切到安装页时重新探测一次：手动装好 dsh / npm 装完回来，已装/未装徽标要刷新，
+    // 不能一直用启动时缓存的旧状态
+    await reloadState();
+    renderInstall();
+  }
 }
 $("tabBtnCheck").addEventListener("click", () => switchTab("check"));
 $("tabBtnInstall").addEventListener("click", () => switchTab("install"));
@@ -552,22 +597,34 @@ $("installList").addEventListener("click", async (ev) => {
   const btn = ev.target.closest("[data-install]");
   if (!btn) return;
   const clientId = btn.dataset.install;
-  const out = $("installList").querySelector('[data-install-out="' + clientId + '"]');
   btn.disabled = true; btn.textContent = "正在安装…（可能需要几分钟）";
-  if (out) { out.classList.remove("hidden"); out.textContent = "开始安装…"; }
+  const banner = (cls, text) =>
+    $("installList").appendChild(el("div", "result " + cls, text));
   try {
     const r = await api("/api/install_run", { client_id: clientId });
-    if (out) {
-      out.textContent = (r.output || "") + (r.message ? "\n" + r.message : "");
-      out.classList.toggle("err", r.ok === false);
-    }
-    $("installList").appendChild(el("div", "result " + (r.ok === false ? "bad" : "ok"),
-      r.ok === false ? "安装未完成，请查看上方输出。" : "安装完成。可在「检查」页检测连接。"));
+    // 先把最新状态拉回来再渲染——顺序反了的话 renderInstall 的 replaceChildren
+    // 会把刚写进 out 的错误输出和结果横幅整段清掉，用户什么都看不到
     await reloadState();
-    renderInstall();            // 刷新已装/未装徽标
+    renderInstall();
+    const freshOut = $("installList").querySelector('[data-install-out="' + clientId + '"]');
+    const text = (r.output || "") + (r.message ? "\n" + r.message : "");
+    if (freshOut) {
+      freshOut.classList.remove("hidden");
+      freshOut.textContent = text;
+      freshOut.classList.toggle("err", r.ok === false);
+    }
+    banner(r.ok === false ? "bad" : "ok",
+           r.ok === false ? "安装未完成，请查看上方输出。" : "安装完成。可在「检查」页检测连接。");
   } catch (e) {
-    if (out) { out.textContent = e.message; out.classList.add("err"); }
-    btn.disabled = false; btn.textContent = "重试安装";
+    await reloadState().catch(() => {});
+    renderInstall();
+    const freshOut = $("installList").querySelector('[data-install-out="' + clientId + '"]');
+    if (freshOut) {
+      freshOut.classList.remove("hidden");
+      freshOut.classList.add("err");
+      freshOut.textContent = String((e && e.message) || e);
+    }
+    banner("bad", "安装失败，请查看上方输出。");
   }
 });
 

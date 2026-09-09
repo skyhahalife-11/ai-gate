@@ -147,11 +147,15 @@ class Engine:
         鉴权优先用 profile 的 probe_key（跟用户配置解耦），没有才借用户 Key。"""
         probe_model = self.profile.get("probe_model")
         wire = _wire(self.profile, "claude_code")
-        probe_key = self.profile.get("probe_key")
+        # 探活 Key 也要放进网关真正采信的那个请求头（profile.auth.required_header），
+        # 不能想当然塞 x-api-key——AI Gate 只读自定义 Token 头。
+        auth_rules = self.profile.get("auth") or {}
+        req_header = (auth_rules.get("required_header") or "").strip()
+        probe_key = self.profile.get("probe_key") or self._any_known_key()
         if probe_key:
-            headers = {"x-api-key": probe_key}
+            headers = {req_header: probe_key} if req_header else {"x-api-key": probe_key}
         else:
-            headers = _auth_headers(cfg, fallback_key=self._any_known_key())
+            headers = _auth_headers(cfg)     # 借配置里已经摆好的请求头（通常是 Token）
 
         urls = expected_base_urls(self.profile, "claude_code")
         if not urls:
@@ -204,7 +208,7 @@ class Engine:
     def assess_client(self, client_id: str) -> ClientState:
         adapter = get_adapter(client_id)
         cfg = self.read_harness(client_id)
-        binary = adapter.detect_binary(env=self.env)
+        binary = adapter.detect_binary(env=self.env, home=self.home)
         base = ClientState(
             client_id=client_id, display_name=adapter.display_name, state="",
             state_label="", binary_installed=binary, config_present=cfg.has_any_config,
@@ -263,7 +267,7 @@ class Engine:
     def _client_gateway_down(self, client_id: str) -> ClientState:
         adapter = get_adapter(client_id)
         cfg = self.read_harness(client_id)
-        binary = adapter.detect_binary(env=self.env)
+        binary = adapter.detect_binary(env=self.env, home=self.home)
         base = ClientState(
             client_id=client_id, display_name=adapter.display_name, state=STATE_BLOCKED,
             state_label=STATE_LABEL[STATE_BLOCKED], binary_installed=binary,
@@ -354,8 +358,11 @@ class Engine:
                 store_steps, _changed, note = adapter.store_key(
                     cfg, key, env=self.env, home=self.home, project_dir=self.project_dir)
             except OSError as exc:
+                failed = fixer.rollback(manifest)
+                rb = "已按备份恢复原配置。" if not failed else \
+                     "尝试恢复原配置，但以下文件未能还原：{}。".format("、".join(failed))
                 return {"result": RESULT_MANUAL,
-                        "message": f"Key 保存失败：{exc}。原配置未改动，备份在 {manifest.directory}。",
+                        "message": f"Key 保存失败：{exc}。{rb}原始备份仍在 {manifest.directory}。",
                         "steps": steps, "backup_dir": manifest.directory}
             steps.extend({"detail": s} for s in store_steps)
             # 让本进程立刻能用这个 Key（Codex/DeepSeek 读 AI_GATE_API_KEY）
@@ -381,8 +388,11 @@ class Engine:
             applied = fixer.apply_fixes(adapter, cfg, changes, env=self.env,
                                         home=self.home, project_dir=self.project_dir)
         except OSError as exc:
+            failed = fixer.rollback(manifest)
+            rb = "已按备份恢复原配置。" if not failed else \
+                 "尝试恢复原配置，但以下文件未能还原：{}。".format("、".join(failed))
             return {"result": RESULT_MANUAL,
-                    "message": f"配置写入失败：{exc}。原配置未改动，备份在 {manifest.directory}。",
+                    "message": f"配置写入失败：{exc}。{rb}原始备份仍在 {manifest.directory}。",
                     "steps": steps, "backup_dir": manifest.directory}
         steps.append({"detail": "；".join(applied) if applied else "没有需要写入的改动"})
         return self._after_write(client_id, steps, manifest, None,
@@ -416,12 +426,21 @@ class Engine:
             client = ClientState(
                 client_id=client_id, display_name=adapter.display_name,
                 state=STATE_UNCONFIGURED, state_label=STATE_LABEL[STATE_UNCONFIGURED],
-                binary_installed=adapter.detect_binary(env=self.env),
+                binary_installed=adapter.detect_binary(env=self.env, home=self.home),
                 config_present=probe_cfg.has_any_config,
                 files=self._client_files(probe_cfg))
             return {"path": None,
                     "message": f"{adapter.display_name} 无法连接 AI Gate，未保存任何配置。",
                     "note": issue["detail"], "steps": [], "client": asdict(client)}
+        # 已有配置就不重配：generate_minimal_config 是整文件覆盖，会把 permissions /
+        # hooks / 旧设置一起冲掉且不留备份。只有「装了但一行没配」的机器才该走这里。
+        if probe_cfg.has_any_config:
+            client = self.assess_client(client_id)
+            return {"path": None,
+                    "message": f"{adapter.display_name} 已有一份配置，为避免覆盖它，这里不重新生成。",
+                    "note": ("请在「检查」页按列出的原因逐项修复。若确实要推倒重来，"
+                             "请先手动删除现有的配置文件，再回来点「配置」。"),
+                    "steps": [], "client": asdict(client)}
         known = model_ids(self.profile)
         pm = self._probe_model()
         pick = model if (model and model in known) else (pm if pm in known else (known[0] if known else ""))

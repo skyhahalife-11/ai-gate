@@ -136,13 +136,15 @@ class HarnessAdapter:
         """本机是否装了/配置过这个 harness。"""
         raise NotImplementedError
 
-    def detect_binary(self, env=None) -> bool:
+    def detect_binary(self, env=None, home=None) -> bool:
         """是否真的装了客户端的可执行程序（shutil.which 在 PATH 里找，
         Windows 会按 PATHEXT 自动找到 .cmd/.exe）。
 
         这跟 detect()（探测配置痕迹）是两回事：detect_binary 用于区分
         「没装客户端」和「装了但没配置」——前者引导去安装，后者引导去配置。
-        测试或特殊部署用 SUTURE_BINARY_OVERRIDE_<HARNESS_ID> 覆盖。"""
+        测试或特殊部署用 SUTURE_BINARY_OVERRIDE_<HARNESS_ID> 覆盖。
+        home 参数保留给按配置目录判装的适配器（如 deepseek），PATH 判装
+        的适配器用不到。"""
         env = env if env is not None else os.environ
         flag = env.get(f"SUTURE_BINARY_OVERRIDE_{self.harness_id.upper()}")
         if flag is not None:

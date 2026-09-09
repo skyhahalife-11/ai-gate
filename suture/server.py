@@ -37,7 +37,7 @@ def _client_meta(engine: E.Engine, adapter) -> Dict[str, Any]:
     return {
         "client_id": adapter.harness_id,
         "display_name": adapter.display_name,
-        "binary_installed": adapter.detect_binary(env=engine.env),
+        "binary_installed": adapter.detect_binary(env=engine.env, home=engine.home),
         "config_present": bool(
             getattr(adapter.read(env=engine.env, home=engine.home,
                                  project_dir=engine.project_dir,
@@ -181,6 +181,10 @@ class Handler(BaseHTTPRequestHandler):
                 except Exception as exc:      # noqa: BLE001
                     self._send_json({"error": f"操作失败：{exc}"}, 500)
                     return
+                # 动作会改变状态、可能暴露新一层的问题——把最新结果写回 last_report，
+                # 否则用户紧接着点新出现的 issue 会在旧报告里找不到而报 409。
+                if result.get("client"):
+                    self._record_client(result["client"])
                 self._send_json(result)
                 return
 

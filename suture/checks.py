@@ -602,6 +602,26 @@ def _e2e_fallback(cfg: HarnessConfig, profile: Dict[str, Any], e2e: Optional[Dic
             "prompt": None,
         }]
     if hint == "model":
+        # base_url 静态检查没报错、模型也在快照清单里，但真实请求仍 400/404——
+        # 那多半是型号在网关侧已下线/改名、内置型号快照没跟上。此时别再给
+        # 「把地址修正到规范地址」的 auto 修复：地址本来就对，点了等于把同一个值
+        # 重写一遍、原地循环。
+        cur = (cfg.field(FIELD_BASE_URL).value or "").strip().rstrip("/")
+        expected_norm = expected_base_url(profile, cfg.harness_id).rstrip("/")
+        alternates = {a.rstrip("/") for a in expected_base_urls(profile, cfg.harness_id)[1:]}
+        if cur and (cur == expected_norm or cur in alternates):
+            tried = cfg.model_candidates or ([cfg.field(FIELD_MODEL).value]
+                                             if cfg.field(FIELD_MODEL).is_set else [])
+            desc = "、".join(f"「{m}」" for m in tried[:3]) or "默认模型"
+            return [{
+                "id": "model-unrouted", "title": "网关实际拒绝了配置里的模型",
+                "detail": ("网关返回了「模型或路径不存在」，但配置用的 " + desc + " 在网关型号"
+                           "清单里、地址也正确——最可能是这个型号在网关侧已下线或改名，型号"
+                           "清单（内置快照）还没跟上。请联系网关确认现在可用的型号，或换一个"
+                           "型号再试；清单更新后重新检查即可。"),
+                "current_value": "", "severity": "high", "repair_kind": "external",
+                "fix_field": None, "fix_value": None, "choices": [], "prompt": None,
+            }]
         return [{
             "id": "base_url", "title": "请求没到网关（地址或路径可能不对）",
             "detail": "静态判断都符合登记值，但真实请求仍失败。可以先把网关地址修正到规范"
@@ -741,9 +761,11 @@ def blocked_reasons(cfg: HarnessConfig, profile: Dict[str, Any],
     hint = e2e_hint(e2e)
 
     # 契约层面就不可达：网关只认某个自定义头、而客户端根本带不了它（codex 之于
-    # AI Gate 的 Token）。补头 / 换 Key 都救不了，任何静态项也都无关紧要——
-    # 直接给单条外部说明，别把用户带去填 Key 的死循环。
-    if hint == "auth" and auth_requirement_unsatisfiable(cfg, profile):
+    # AI Gate 的 Token）。这与有没有发过 e2e 无关——缺 base_url 时同样连不上，
+    # 先把用户带去修一个没用的地址（配好 base_url 之后才会冒出 401）是浪费。
+    # 补头 / 换 Key / 修地址都救不了，任何静态项也都无关紧要——直接给单条外部
+    # 说明，别把用户带去死循环。只有网关侧故障（跟本地配置无关）时不短路。
+    if auth_requirement_unsatisfiable(cfg, profile) and hint != "gateway_side":
         return [auth_incompatible_issue(cfg, profile)]
 
     bad = [f for f in run_all_checks(cfg, profile) if not f.ok]
@@ -771,6 +793,41 @@ def blocked_reasons(cfg: HarnessConfig, profile: Dict[str, Any],
         fb = fallback[0]
         if fb["id"] not in seen and not _same_class_present(fb["id"], issues):
             issues.append(fb)
+
+    # 生效来源是系统环境变量、而这个 harness 写不到环境变量时（claude_code 的
+    # 地址/模型会被 ANTHROPIC_BASE_URL / ANTHROPIC_MODEL 这类 OS 环境变量压过），
+    # auto 修复把正确值写进文件那一层根本不生效——点了没反应；conflict 的 auto
+    # 更糟，会把环境变量里的（错误）值复制回文件；_e2e_fallback 的兜底也会把同一条
+    # no-op 的 base_url 自动修复再塞回来。三条路互相否定、永远收敛不了。
+    # 放在 fallback 之后统一处理：把这类 base_url/model 问题整体换成一条外部说明
+    # （去环境变量那里改），并去掉 conflict / 兜底里会复制错误值回文件的自动修复。
+    env_wrong = {
+        i["fix_field"] for i in issues
+        if i.get("fix_field") in (FIELD_BASE_URL, FIELD_MODEL)
+        and (i["id"] == "base_url" or i["id"] == "model" or i["id"].startswith("model:"))
+        and cfg.field(i["fix_field"]).source_layer == "环境变量"
+    }
+    if env_wrong:
+        issues = [i for i in issues
+                  if not (i["id"].startswith("conflict:")
+                          and i.get("fix_field") in env_wrong)
+                  and not (i.get("fix_field") in env_wrong
+                           and i.get("repair_kind") in ("auto", "choice"))]
+        target_names = []
+        if FIELD_BASE_URL in env_wrong:
+            target_names.append("网关地址 ANTHROPIC_BASE_URL")
+        if FIELD_MODEL in env_wrong:
+            target_names.append("默认模型 ANTHROPIC_MODEL")
+        issues.append({
+            "id": "env-source",
+            "title": "该设置来自系统环境变量，需要在环境变量里改",
+            "detail": ("当前生效的" + "、".join(target_names) + "来自系统环境变量，不是配置文件——"
+                       "环境变量的优先级更高，Suture 只能写配置文件、改不到你的环境变量，"
+                       "所以这里不提供自动修复。请到「系统设置 → 环境变量」里把对应的变量"
+                       "（ANTHROPIC_BASE_URL / ANTHROPIC_MODEL）改成网关的规范地址/想用的模型，"
+                       "或直接删除它让配置文件生效；改完再点「开始检查」。"),
+            "current_value": "", "severity": "high", "repair_kind": "external",
+            "fix_field": None, "fix_value": None, "choices": [], "prompt": None})
 
     order = {"high": 0, "medium": 1, "low": 2}
     issues.sort(key=lambda i: (order.get(i.get("severity", "low"), 3), i["id"]))

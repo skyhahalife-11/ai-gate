@@ -105,7 +105,7 @@ class DeepSeekHarnessAdapter(HarnessAdapter):
     supports_extra_auth_header = True    # 能往路由 headers.Token 里补 Key
     can_send_custom_request_headers = True   # 路由的 headers 块就是加自定义头的位置
 
-    def detect_binary(self, env=None) -> bool:
+    def detect_binary(self, env=None, home=None) -> bool:
         """dsh CLI 的可执行名不在 PATH、也没法用 shutil.which 可靠找到（实测本机
         ~/.dsh 在但 PATH 里没有 dsh 命令）。装了 DeepSeek Harness 的可靠痕迹是
         harness home（默认 ~/.dsh）目录存在——跟 detect() 用同一套依据。
@@ -116,7 +116,8 @@ class DeepSeekHarnessAdapter(HarnessAdapter):
         flag = env.get("SUTURE_BINARY_OVERRIDE_DEEPSEEK")
         if flag is not None:
             return flag.strip().lower() in ("1", "true", "yes", "on")
-        return os.path.isdir(harness_home(env, resolve_home(None, env)))
+        home = resolve_home(home, env)
+        return os.path.isdir(harness_home(env, home))
 
     def detect(self, env=None, home=None, project_dir=None) -> bool:
         env = env if env is not None else os.environ
@@ -255,9 +256,10 @@ class DeepSeekHarnessAdapter(HarnessAdapter):
         return None
 
     def install_guide(self, env=None) -> str:
-        return ("DeepSeek Harness（dsh）的官方安装命令待确认。请先从官方渠道获取它的"
-                "安装方式；装好后回这个页面点「重新探测」。网关插件用 "
-                "@deepseek-ai/dsh-llm-pi-ai，路由写在 ~/.dsh 的 settings.yaml 里。")
+        return ("DeepSeek Harness（dsh）的官方安装命令还没确认到能安全自动执行的程度，"
+                "Suture 不会替你装。请先从官方渠道拿到安装包并安装；装好后切到「检查」页"
+                "点一次「开始检查」（或刷新本页），工具就会识别到它已安装。接 AI Gate 需要 "
+                "@deepseek-ai/dsh-llm-pi-ai 插件，路由写在 ~/.dsh 的 settings.yaml 里。")
 
     def key_store_guide(self, env=None) -> str:
         return ("DeepSeek Harness 的 Key 存在 ~/.dsh/.credentials.yaml 的 refs 段里，"
