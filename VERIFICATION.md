@@ -1,10 +1,74 @@
 # 验收记录
 
-`python3 -m unittest discover -s tests -t .` —— 92 条，全部通过（1 条在 root 下跳过，
+`python3 -m unittest discover -s tests -t .` —— 86 条，全部通过（1 条在 root 下跳过，
 已另行以普通用户身份验证）。测试不依赖真实网关，用 `mock_gateway.py` 起一个假网关，
 让它表现成各种情况来触发每条判断分支。
 
-## 覆盖了什么
+> **2026-09-09 起语义改为「连通体检 + 引导修复 + 安装上手」**，见下方
+> 「2026-09-09 重构为连通优先」一节。旧文档里讲到的「阶段一/二/三」「一键修复(N 项)」
+> 「修完验证失败自动回滚」「重新检查按钮」等都属于重构前的语义，已不再适用。
+
+---
+
+## 2026-09-09 重构为连通优先
+
+**目标语义**：只判每个客户端能不能连上 AI Gate，通就绿勾、不罗列任何细项；连不上才
+展开「可能的原因」，每条原因=人话+怎么修，按修复方式分类（自动修复按钮 / 模型候选下拉 /
+粘贴 Key / 外部处理）；装了没配的给配置面板；没装的引导去「安装 / 上手」页。另有安装页
+自动执行官方安装命令。
+
+**四态判定顺序**（`suture/engine.py::assess_client`）：
+无配置 + 无二进制 → `not_installed`；无配置但有二进制 → 跑客户端自证（通=`connected`，
+不通=`unconfigured`）；有配置 → 用**客户端自己配的模型**发真实 e2e 请求，任一成功=
+`connected`（成功路径不跑静态体检），全失败=`blocked` 并调用 `checks.blocked_reasons`
+跑诊断、按严重度出原因清单。顶层 `probe` 判为网关侧（超时/连不上/限流/5xx）时短路：
+每个客户端只给一条 `external` 的「网关侧连不上」，完全不碰本地配置。
+
+### 这轮覆盖的新语义（对应新增/改写的测试）
+
+| 场景 | 验证 |
+|---|---|
+| 连通优先 | 配置能连通时，即使静态项有问题（如 settings.json 多了个不认识的顶层字段）也判 `connected`、issues 为空 |
+| 成功不罗列 | 正确配置 → `connected`，无任何明细 |
+| e2e 用配置模型 | 配了坏模型名 → `blocked`，最后失败那次请求用的是配置模型而非探活模型；模型不在路由表 → `choice` 原因 |
+| 网关侧短路 | 5xx/限流 → 顶层 `gateway_down`、配置逐字节没动；每客户端只有一条 `external` 原因，apply 它返回 `manual`、不改文件 |
+| 单条动作 | auto（地址多拼 /v1、模型大小写 typo）/ choice（候选下拉）/ input（粘贴 Key）各能修成 `connected` |
+| 模型只改目标 | DeepSeek 注册多个模型时，把坏的换掉、其余模型原样保留（`zzz-model-a→glm-5.3` 后 `zzz-model-b` 仍在） |
+| 环境变量 Key（codex） | 项目不可信时修复写用户级 config.toml；Key 走 env_key 引用 + `setx`（仅真实运行且 Windows 时），配置里永不明文 |
+| DeepSeek Key | 存 `.credentials.yaml` 的 refs，权限 600 |
+| 一键配置全新用户 | 无配置沙箱下 `configure_client` 生成最小配置 + 存 Key → `connected` |
+| 安装执行器 | 官方命令/覆盖命令真实跑并回收输出；缺 Node 给 nodejs.org 引导；无命令只给引导；超时强杀进程树不挂死；未知客户端 400 |
+| 服务端接口 | state 含 3 客户端 + 运行时探测；check→action 修复流；action 先于 check=409；Key 不外泄；recheck/configure/install_run |
+| 安全回归 | Key 只以掩码出现；仅 127.0.0.1 + 一次性令牌 |
+
+### 过程中发现并修掉的问题（这轮新增）
+
+1. **Windows 上客户端自证会无限期挂死。** `selftest.run` 原先用 stdout/stderr 管道承接
+   真实客户端的输出；像 Codex 这种 launcher 会再派生孙进程，孙进程继承了管道写端——
+   父进程退出后 `communicate()` 仍等不到 EOF。实测一台装了 Codex 但没连 AI Gate 的机器，
+   体检在自证一步卡 90 秒以上不返回（`subprocess.run` 超时杀掉父进程后 Windows 还会再等
+   一次 `communicate()`，仍然不返回）。改成把输出写进临时文件、等「父进程退出」而非
+   「管道关闭」，超时用 `taskkill /T` 强杀整棵进程树。安装执行器用同一套承接方式。
+2. **CLI 子进程测试不封闭。** `test_cli.run_cli` 组装子进程环境时没带上
+   `SUTURE_SELFTEST_COMMAND`，导致装了但没配的客户端（本机真实 codex）去跑真实的
+   客户端自证——测试结果取决于跑测试这台机器装没装、登录没登录，同一份配置有时绿、
+   有时红、有时直接超时。改成默认注入隔离命令；断言整体结果的 CLI 用例限定
+   `--harness claude_code`，只把「网关侧短路」那条保留三客户端全跑（网关 down 时短路、
+   不触发自证，仍然确定）。
+
+### 尚未验证（2026-09-09 新增）
+
+- DeepSeek Harness 的官方安装命令与非交互自证方式：`install_command()` /
+  `self_test_command()` 都返回 None，安装页与自证对它只给引导，不自动执行。
+- Claude Code / Codex 的 npm 安装命令需在干净 Windows 机器上端到端跑一次（含装完
+  PATH 刷新、`claude` 二进制探测边界——npm 全局 bin 进 PATH 后新终端才生效）。
+- Codex 的 `setx AI_GATE_API_KEY` 不可备份/不可回滚，真实机器上只验证了引导文案与
+  code 路径（测试环境 env≠os.environ 时不会真的执行 setx）。
+- Codex 的 base_url 是否真需要 `/v1` 后缀、npm 包名，需各连一次真实环境确认。
+
+---
+
+## 覆盖了什么（2026-09-09 之前语义）
 
 | 范围 | 验证内容 |
 |---|---|

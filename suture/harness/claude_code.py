@@ -112,6 +112,7 @@ class ClaudeCodeAdapter(HarnessAdapter):
     harness_id = "claude_code"
     display_name = "Claude Code CLI"
     config_format = "json"
+    binary_name = "claude"
 
     def detect(self, env=None, home=None, project_dir=None) -> bool:
         env = env if env is not None else os.environ
@@ -242,6 +243,27 @@ class ClaudeCodeAdapter(HarnessAdapter):
         故意不带 --model：整个自证的意义就在于让客户端用它自己那一套解析结果，
         Suture 不往里塞任何东西。"""
         return ["claude", "-p", "hi"]
+
+    def install_command(self, env=None) -> Optional[List[str]]:
+        return ["npm", "install", "-g", "@anthropic-ai/claude-code"]
+
+    def install_guide(self, env=None) -> str:
+        return ("Claude Code 官方通过 npm 分发：`npm install -g @anthropic-ai/claude-code`。"
+                "注意 Windows 原生命令行（cmd/PowerShell）可能不是官方主推的形态，"
+                "如果装完还是找不到 claude 命令，多半是在 WSL 或其它终端环境里用的，"
+                "请在真正使用它的那个环境里安装，或直接用官方安装器。")
+
+    def key_store_guide(self, env=None) -> str:
+        return "Claude Code 会读环境变量 ANTHROPIC_API_KEY（或配置里的同名 env 项）。Suture 会把 Key 写进它的 settings.json。"
+
+    def store_key(self, cfg: HarnessConfig, key: str,
+                  env=None, home=None, project_dir=None) -> Tuple[List[str], List[str], str]:
+        """Claude Code 的 Key 走配置文件的 env 块（写进实际生效的那一层），
+        由引擎先备份再写入，可回滚。"""
+        target = self._target_file(cfg)
+        steps = self.apply(cfg, {FIELD_AUTH: key}, env=env, home=home, project_dir=project_dir)
+        return (steps, [target.path],
+                "改的是配置文件，正在运行的 Claude Code 需要重新启动才会读到新的 Key。")
 
     def generate_minimal_config(self, base_url: str, model: str,
                                 env=None, home=None, project_dir=None) -> str:

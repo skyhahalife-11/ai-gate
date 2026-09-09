@@ -454,3 +454,187 @@ def run_all_checks(cfg: HarnessConfig, profile: Dict[str, Any]) -> List[Finding]
 
 def collect_info(cfg: HarnessConfig) -> List[InfoItem]:
     return [InfoItem(text=n) for n in cfg.notes]
+
+
+# ---------- 连通失败时的「可能原因」诊断（连通优先模式用） ----------
+# checks.py 的静态项原本是唯一的检查手段；重构后它们降级成"连不上时才会跑的
+# 诊断器"——只有 block 分支才调用 run_all_checks，把 not-ok 的 finding 翻译成
+# 给用户看的、可挑着修的原因清单（BlockIssue）。成功路径完全不碰这里。
+
+
+def e2e_hint(e2e: Optional[Dict[str, Any]]) -> str:
+    """把一次端到端请求的失败特征归成一个方向，用于给各原因定优先级：
+    auth / model / base_url / gateway_side / unknown。"""
+    if not e2e:
+        return "unknown"
+    cls = e2e.get("classification")
+    status = e2e.get("status")
+    if cls == "auth_error" or status in (401, 403):
+        return "auth"
+    if status in (400, 404):
+        return "model"          # 404 最常见是"模型不在路由表/路径不对"
+    if cls in ("timeout", "network_error", "rate_limited", "server_error"):
+        return "gateway_side"
+    return "unknown"
+
+
+def finding_to_issue(f: Finding) -> Dict[str, Any]:
+    """把一条静态 finding 翻成给用户看的「原因 + 怎么修」。
+    不负责判严重度（那要看 e2e 失败的方向），只定 repair_kind 和动作字段。"""
+    key = f.key
+    cur: Dict[str, Any] = {
+        "id": key,
+        "title": "",
+        "detail": f.detail,
+        "current_value": f.current_value,
+        "repair_kind": "none",
+        "fix_field": None,
+        "fix_value": None,
+        "choices": f.choices,
+        "prompt": None,
+    }
+
+    if key.startswith("syntax:"):
+        cur["title"] = "配置文件格式有问题"
+    elif key.startswith("unknown-key:"):
+        cur["title"] = "配置里有不认识的字段名"
+        cur["detail"] = f.detail + " 请把它改成工具认得的正确字段名。"
+    elif key.startswith("inactive-layer:"):
+        cur["title"] = "有配置，但这一层实际不会生效"
+        cur["repair_kind"] = "external"
+    elif key.startswith("conflict:"):
+        if "托管配置" in (f.note or ""):
+            cur["title"] = "本地设置被组织统一下发的托管配置覆盖"
+        else:
+            cur["title"] = "同一个设置在多层配置里不一致"
+            cur["repair_kind"] = "auto"
+            cur["fix_field"] = f.fix_field
+            cur["fix_value"] = f.fix_value
+    elif key == "base_url":
+        cur["title"] = "网关地址不对"
+        cur["repair_kind"] = "auto"
+        cur["fix_field"] = f.fix_field
+        cur["fix_value"] = f.fix_value
+    elif key == "auth-whitespace":
+        cur["title"] = "Key 前后有多余的空格或换行"
+        cur["repair_kind"] = "auto"
+        cur["fix_field"] = f.fix_field
+        cur["fix_value"] = f.fix_value
+    elif key == "auth-ref":
+        if f.fixable == FIXABLE_YES:
+            cur["title"] = "鉴权引用没写好"
+            cur["repair_kind"] = "auto"
+            cur["fix_field"] = f.fix_field
+            cur["fix_value"] = f.fix_value
+        else:
+            cur["title"] = "Key 还没设置"
+            cur["repair_kind"] = "input"
+            cur["fix_field"] = FIELD_AUTH
+            cur["prompt"] = "在 AI Gate 后台生成 Key 后粘贴到这里"
+    elif key == "auth":
+        cur["title"] = "鉴权信息有问题（Key 缺失或不对）"
+        cur["repair_kind"] = "input"
+        cur["fix_field"] = FIELD_AUTH
+        cur["prompt"] = "在 AI Gate 后台生成 Key 后粘贴到这里"
+    elif key.startswith("auth-extra:"):
+        cur["title"] = "自定义请求头里的 Key 不像是网关签发的"
+        cur["repair_kind"] = "none"
+        cur["detail"] = f.detail + " 需要到来源处（通常是环境变量）改掉它。"
+    elif key in ("auth-conflict", "auth-multiple-active"):
+        cur["title"] = "鉴权信息在多个位置重复设置"
+        cur["repair_kind"] = "none"
+    elif key == "model" or key.startswith("model:"):
+        if f.choices and f.fix_field:
+            cur["title"] = "模型不在网关支持的列表里"
+            cur["repair_kind"] = "choice"
+            cur["fix_field"] = f.fix_field
+        elif f.fixable == FIXABLE_YES:
+            cur["title"] = "模型名字只差大小写或写法"
+            cur["repair_kind"] = "auto"
+            cur["fix_field"] = f.fix_field
+            cur["fix_value"] = f.fix_value
+        else:
+            cur["title"] = "模型不在网关支持的列表里"
+            cur["repair_kind"] = "choice" if f.fix_field else "none"
+            cur["fix_field"] = f.fix_field
+    else:
+        cur["title"] = f.detail
+    return cur
+
+
+def _severity_for(issue_id: str, hint: str) -> str:
+    if hint == "auth" and (issue_id == "auth" or issue_id.startswith("auth-")):
+        return "high"
+    if hint == "model" and (issue_id == "model" or issue_id.startswith("model:")):
+        return "high"
+    if hint == "base_url" and issue_id == "base_url":
+        return "high"
+    if issue_id == "base_url" or issue_id.startswith("auth") or issue_id == "model" \
+            or issue_id.startswith("model:") or issue_id.startswith("syntax:"):
+        return "medium"
+    return "low"
+
+
+def _e2e_fallback(cfg: HarnessConfig, profile: Dict[str, Any], e2e: Optional[Dict[str, Any]]) -> List[Dict[str, Any]]:
+    """静态检查全过、但真实请求就是不通时用的兜底原因（比如 Key 被后台吊销、
+    或请求到了但模型/路径的问题静态项看不出来）。"""
+    hint = e2e_hint(e2e)
+    known = model_ids(profile)
+    if hint == "auth":
+        return [{
+            "id": "auth", "title": "网关拒绝了这个 Key（可能已失效或被后台吊销）",
+            "detail": "网关返回了鉴权错误，但本机配置看起来没问题——最常见是 Key 在网关后台"
+                      "被重新生成或吊销了。重新生成一个粘贴进来。",
+            "current_value": "", "severity": "high", "repair_kind": "input",
+            "fix_field": FIELD_AUTH, "fix_value": None, "choices": [],
+            "prompt": "在 AI Gate 后台重新生成 Key 后粘贴到这里",
+        }]
+    if hint == "model" and not cfg.field(FIELD_MODEL).is_set and not cfg.model_candidates:
+        return [{
+            "id": "model", "title": "没指定模型，默认模型网关可能不认",
+            "detail": "端到端请求没成功，而且客户端里没指定用哪个模型。从网关支持的列表里"
+                      "选一个默认模型写进去。",
+            "current_value": "", "severity": "high", "repair_kind": "choice",
+            "fix_field": FIELD_MODEL, "fix_value": None,
+            "choices": [{"label": m, "value": m} for m in known],
+            "prompt": None,
+        }]
+    if hint == "model":
+        return [{
+            "id": "base_url", "title": "请求没到网关（地址或路径可能不对）",
+            "detail": "静态判断都符合登记值，但真实请求仍失败。可以先把网关地址修正到规范"
+                      "地址试一次；如果已是指向规范地址仍失败，再联系网关排查。",
+            "current_value": "", "severity": "high", "repair_kind": "auto",
+            "fix_field": FIELD_BASE_URL,
+            "fix_value": expected_base_url(profile, cfg.harness_id),
+            "choices": [], "prompt": None,
+        }]
+    return [{
+        "id": "gateway-side", "title": "AI Gate 网关侧暂时连不上",
+        "detail": "这次失败更像网关或网络侧的问题，不是本地配置造成的。稍后重试；"
+                  "如果一直这样，联系网关值班人员。",
+        "current_value": "", "severity": "high", "repair_kind": "external",
+        "fix_field": None, "fix_value": None, "choices": [], "prompt": None,
+    }]
+
+
+def blocked_reasons(cfg: HarnessConfig, profile: Dict[str, Any],
+                    e2e: Optional[Dict[str, Any]] = None) -> List[Dict[str, Any]]:
+    """只在客户端连不上时调用：把静态检查 + 端到端失败特征翻译成可挑选的原因清单。
+    按严重度降序返回。"""
+    hint = e2e_hint(e2e)
+    bad = [f for f in run_all_checks(cfg, profile) if not f.ok]
+    issues: List[Dict[str, Any]] = []
+    seen: set = set()
+    for f in bad:
+        it = finding_to_issue(f)
+        if it["id"] in seen:
+            continue
+        seen.add(it["id"])
+        it["severity"] = _severity_for(it["id"], hint)
+        issues.append(it)
+    if not issues:
+        issues = _e2e_fallback(cfg, profile, e2e)
+    order = {"high": 0, "medium": 1, "low": 2}
+    issues.sort(key=lambda i: (order.get(i.get("severity", "low"), 3), i["id"]))
+    return issues

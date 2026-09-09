@@ -11,8 +11,10 @@ from __future__ import annotations
 
 import os
 import re
+import subprocess
+import sys
 import tomllib
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Tuple
 
 from .base import (
     FIELD_AUTH, FIELD_BASE_URL, FIELD_MODEL, FileState, HarnessAdapter,
@@ -72,6 +74,7 @@ class CodexAdapter(HarnessAdapter):
     harness_id = "codex"
     display_name = "Codex CLI"
     config_format = "toml"
+    binary_name = "codex"
 
     def detect(self, env=None, home=None, project_dir=None) -> bool:
         env = env if env is not None else os.environ
@@ -199,6 +202,43 @@ class CodexAdapter(HarnessAdapter):
         跑（比如项目目录没初始化 git），不加的话会因为目录不是 git 仓库而失败，
         跟网关通不通没关系，会污染自证结果。默认是只读沙箱，不需要额外加权限。"""
         return ["codex", "exec", "--skip-git-repo-check", "hi"]
+
+    def install_command(self, env=None) -> Optional[List[str]]:
+        # OpenAI Codex CLI 官方 npm 包名（实现阶段已在官方文档核实）。
+        return ["npm", "install", "-g", "@openai/codex"]
+
+    def install_guide(self, env=None) -> str:
+        return ("Codex CLI 官方通过 npm 分发：`npm install -g @openai/codex`。"
+                "装完确认 `codex --version` 能跑；如果找不到命令，多半要重开终端或"
+                "把 npm 全局 bin 目录加进 PATH。")
+
+    def key_store_guide(self, env=None) -> str:
+        return "Codex 的 Key 通过环境变量 AI_GATE_API_KEY 提供（配置里只写这个变量名）。"
+
+    @staticmethod
+    def _persist_user_env(name: str, value: str, env: Dict[str, str]) -> str:
+        """把环境变量持久化。只在真实运行（env 就是 os.environ）时用 setx 写用户级，
+        对之后新开的终端生效；测试/隔离 env 里不做（会把测试结果绑定到这台机器的
+        环境上）。当前进程内是否生效由引擎负责。"""
+        if env is os.environ and sys.platform == "win32":
+            try:
+                subprocess.run(["setx", name, value], check=False,
+                               stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+                return f"已写入 Windows 用户环境变量 {name}（重开终端后永久生效）。"
+            except OSError:
+                pass
+        return f"请把环境变量 {name} 设为这个值（当前会话已生效，用于本次验证）。"
+
+    def store_key(self, cfg: HarnessConfig, key: str,
+                  env=None, home=None, project_dir=None) -> Tuple[List[str], List[str], str]:
+        """Codex：Key 不写进 TOML（那是环境变量名），这里负责
+        1) 确保 provider 的 env_key 指向 AI_GATE_API_KEY（会写配置文件，可备份）；
+        2) 把值持久化到用户环境变量。"""
+        steps = self.apply(cfg, {FIELD_AUTH: key}, env=env, home=home, project_dir=project_dir)
+        target = self._target_file(cfg)
+        env = env if env is not None else os.environ
+        note = self._persist_user_env("AI_GATE_API_KEY", key, env)
+        return (steps, [target.path], note)
 
     def generate_minimal_config(self, base_url: str, model: str,
                                 env=None, home=None, project_dir=None) -> str:

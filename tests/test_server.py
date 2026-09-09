@@ -40,6 +40,7 @@ class TestServer(unittest.TestCase):
         }})
         self.httpd, self.state, self.url = S.serve_in_background(make_engine(self.sb))
         self.base = f"http://127.0.0.1:{self.httpd.server_address[1]}"
+        self.token = self.state.token
 
     def tearDown(self):
         self.httpd.shutdown()
@@ -64,61 +65,90 @@ class TestServer(unittest.TestCase):
         self.assertEqual(cm.exception.code, 403)
 
     def test_ui_served_with_token_substituted(self):
-        status, html = _get(self.base + "/?token=" + self.state.token)
+        status, html = _get(self.base + "/?token=" + self.token)
         self.assertEqual(status, 200)
-        self.assertIn(self.state.token, html)
+        self.assertIn(self.token, html)
         self.assertNotIn("__SUTURE_TOKEN__", html)
 
-    def test_check_then_fix_flow(self):
-        status, state = _get(self.base + "/api/state", token=self.state.token)
-        self.assertEqual(json.loads(state)["installed"][0]["id"], "claude_code")
+    def test_state_lists_all_three_clients_with_meta(self):
+        status, raw = _get(self.base + "/api/state", token=self.token)
+        state = json.loads(raw)
+        self.assertEqual(status, 200)
+        ids = [c["client_id"] for c in state["clients"]]
+        self.assertEqual(set(ids), {"claude_code", "codex", "deepseek"})
+        self.assertTrue(state["models"])
+        self.assertEqual(state["model_count"], len(state["models"]))
 
-        _, report = _post(self.base + "/api/check", {}, token=self.state.token)
-        self.assertEqual(report["result"], "issues")
-        self.assertEqual(report["harnesses"][0]["harness_id"], "claude_code")
+    def test_check_then_single_action_fix_flow(self):
+        _, report = _post(self.base + "/api/check", {}, token=self.token)
+        self.assertEqual(report["result"], "blocked")
+        client = report["clients"][0]
+        self.assertEqual(client["client_id"], "claude_code")
+        base_issue = next(i for i in client["issues"] if i["id"] == "base_url")
 
-        _, fixed = _post(self.base + "/api/fix", {"harness_id": "claude_code"},
-                         token=self.state.token)
+        _, fixed = _post(self.base + "/api/action",
+                         {"client_id": "claude_code", "issue_id": base_issue["id"]},
+                         token=self.token)
         self.assertEqual(fixed["result"], "fixed", fixed.get("message"))
+        self.assertEqual(fixed["client"]["state"], "connected")
         after = json.load(open(cc_settings(self.sb), encoding="utf-8"))["env"]
         self.assertEqual(after["ANTHROPIC_BASE_URL"], self.sb.base_url)
 
-    def test_fix_before_check_is_rejected_clearly(self):
+    def test_action_before_check_is_rejected_clearly(self):
         with self.assertRaises(urllib.error.HTTPError) as cm:
-            _post(self.base + "/api/fix", {"harness_id": "claude_code"}, token=self.state.token)
-        self.assertEqual(cm.exception.code, 400)
-        self.assertIn("先执行检查", json.loads(cm.exception.read())["error"])
+            _post(self.base + "/api/action",
+                  {"client_id": "claude_code", "issue_id": "base_url"},
+                  token=self.token)
+        self.assertEqual(cm.exception.code, 409)
+        self.assertIn("重新检查", json.loads(cm.exception.read())["error"])
+
+    def test_action_with_unknown_issue_is_rejected(self):
+        _, _ = _post(self.base + "/api/check", {}, token=self.token)
+        with self.assertRaises(urllib.error.HTTPError) as cm:
+            _post(self.base + "/api/action",
+                  {"client_id": "claude_code", "issue_id": "not-there"},
+                  token=self.token)
+        self.assertEqual(cm.exception.code, 409)
 
     def test_key_never_leaves_through_api(self):
         secret = "yotta_pk_valid1234"
-        _, report = _post(self.base + "/api/check", {}, token=self.state.token)
+        _, report = _post(self.base + "/api/check", {}, token=self.token)
         self.assertNotIn(secret, json.dumps(report, ensure_ascii=False))
 
-    def test_apply_choice_endpoint(self):
-        # 这份配置本来就有模型（glm-5.3），改测「模型没配置」这种有候选菜单的场景，
-        # 单独另开一个 sandbox 更干净。
+    def test_configure_endpoint_builds_fresh_config(self):
+        # 这个 sandbox 里 claude_code 已有配置；另起一个干净的测全新用户配置
         with Sandbox() as sb2:
-            write_json(cc_settings(sb2), {"env": {
-                "ANTHROPIC_BASE_URL": sb2.base_url,
-                "ANTHROPIC_API_KEY": "yotta_pk_valid1234",
-            }})
             httpd, state, _ = S.serve_in_background(make_engine(sb2))
             base = f"http://127.0.0.1:{httpd.server_address[1]}"
             try:
-                _, report = _post(base + "/api/check", {}, token=state.token)
-                findings = report["harnesses"][0]["findings"]
-                model_finding = next(f for f in findings if f["key"] == "model")
-                self.assertTrue(model_finding["choices"])
-                chosen = next(c for c in model_finding["choices"] if c["label"] == "glm-5.3")
+                _, res = _post(base + "/api/configure",
+                               {"client_id": "claude_code", "model": "glm-5.3",
+                                "api_key": "yotta_pk_fresh1234"}, token=state.token)
+                self.assertEqual(res["client"]["state"], "connected", res.get("message"))
+                self.assertIn(".claude", res["path"])
+            finally:
+                httpd.shutdown()
+                httpd.server_close()
 
-                _, result = _post(base + "/api/apply_choice", {
-                    "harness_id": "claude_code",
-                    "field": model_finding["fix_field"],
-                    "value": chosen["value"],
-                }, token=state.token)
-                self.assertEqual(result["result"], "fixed", result.get("message"))
-                after = json.load(open(cc_settings(sb2), encoding="utf-8"))["env"]
-                self.assertEqual(after["ANTHROPIC_MODEL"], "glm-5.3")
+    def test_action_after_configure_with_bad_key_is_not_stale(self):
+        """全新用户配置连 AI Gate 时把 Key 填错 → 界面就地出现 blocked 原因卡，
+        用户接着点那条修复不能因为「还没有过 check」而被 409 挡掉。"""
+        with Sandbox() as sb2:
+            httpd, state, _ = S.serve_in_background(make_engine(sb2))
+            base = f"http://127.0.0.1:{httpd.server_address[1]}"
+            try:
+                _, res = _post(base + "/api/configure",
+                               {"client_id": "claude_code", "model": "glm-5.3",
+                                "api_key": "sk-fake-not-gateway-key"}, token=state.token)
+                self.assertEqual(res["client"]["state"], "blocked")
+                auth_issue = next(i for i in res["client"]["issues"] if i["id"] == "auth")
+                self.assertEqual(auth_issue["repair_kind"], "input")
+
+                _, fixed = _post(base + "/api/action",
+                                 {"client_id": "claude_code", "issue_id": "auth",
+                                  "value": "yotta_pk_fresh1234"}, token=state.token)
+                self.assertEqual(fixed["result"], "fixed", fixed.get("message"))
+                self.assertEqual(fixed["client"]["state"], "connected")
             finally:
                 httpd.shutdown()
                 httpd.server_close()

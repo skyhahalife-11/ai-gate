@@ -32,8 +32,9 @@ class TestWriteFailure(unittest.TestCase):
             os.chmod(path, stat.S_IRUSR)
             try:
                 eng = make_engine(sb)
-                h = eng.run(["claude_code"]).harnesses[0]
-                result = eng.fix("claude_code", h.findings)
+                client = eng.run(["claude_code"]).clients[0]
+                issue = next(i for i in client.issues if i["id"] == "base_url")
+                result = eng.apply_action("claude_code", issue)
                 self.assertNotEqual(result["result"], E.RESULT_FIXED)
                 self.assertIn("写入配置失败", result["message"])
                 self.assertEqual(open(path, encoding="utf-8").read(), before)
@@ -43,7 +44,7 @@ class TestWriteFailure(unittest.TestCase):
     def test_engine_surfaces_write_failure_path_exists(self):
         """至少要保证这条分支在代码里是真的接上了的（root 下也能验证）。"""
         import inspect
-        src = inspect.getsource(E.Engine.fix)
+        src = inspect.getsource(E.Engine.apply_action)
         self.assertIn("写入配置失败", src)
         self.assertIn("原配置未被修改", src)
 

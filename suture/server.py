@@ -9,10 +9,12 @@ import json
 import os
 import secrets
 import threading
+from dataclasses import asdict, fields
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from typing import Any, Dict, Optional
 
-from . import engine as E
+from . import engine as E, installer
+from .harness import ALL_ADAPTERS, get_adapter
 
 UI_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "ui")
 
@@ -27,6 +29,25 @@ class _State:
 
 def _json_bytes(payload: Dict[str, Any]) -> bytes:
     return json.dumps(payload, ensure_ascii=False, default=str).encode("utf-8")
+
+
+def _client_meta(engine: E.Engine, adapter) -> Dict[str, Any]:
+    """state 里给界面看的每个客户端静态信息（不触发任何请求/读写）。"""
+    cmd = adapter.install_command(env=engine.env)
+    return {
+        "client_id": adapter.harness_id,
+        "display_name": adapter.display_name,
+        "binary_installed": adapter.detect_binary(env=engine.env),
+        "config_present": bool(
+            getattr(adapter.read(env=engine.env, home=engine.home,
+                                 project_dir=engine.project_dir,
+                                 known_keys=engine.profile.get("known_settings_keys", []),
+                                 accepted_headers=engine.profile.get("auth", {}).get("accepted_headers", []))
+                    , "has_any_config", False)),
+        "install_command": " ".join(cmd) if cmd else None,
+        "has_auto_install": cmd is not None,
+        "install_guide": adapter.install_guide(env=engine.env) or None,
+    }
 
 
 class Handler(BaseHTTPRequestHandler):
@@ -58,6 +79,24 @@ class Handler(BaseHTTPRequestHandler):
     def _send_json(self, payload: Dict[str, Any], status: int = 200) -> None:
         self._send(status, _json_bytes(payload), "application/json; charset=utf-8")
 
+    def _record_client(self, client_dict: Dict[str, Any]) -> None:
+        """把 recheck / configure 返回的最新单客户端写回 last_report，让随后的
+        /api/action 能找到刚出现的原因（比如全新用户配置连不上后立刻想修它）。
+        若还没有过 /api/check，就补一个空报告承接，而不是让 action 报 409。"""
+        if not client_dict or not client_dict.get("client_id"):
+            return
+        report = self.state.last_report
+        if report is None:
+            report = E.Report(profile_source=self.state.engine.profile_source)
+            self.state.last_report = report
+        valid = {f.name for f in fields(E.ClientState)}
+        client = E.ClientState(**{k: v for k, v in client_dict.items() if k in valid})
+        for i, c in enumerate(report.clients):
+            if c.client_id == client.client_id:
+                report.clients[i] = client
+                return
+        report.clients.append(client)
+
     # ---- 路由 ----
     def do_GET(self):
         path = self.path.split("?", 1)[0]
@@ -74,63 +113,107 @@ class Handler(BaseHTTPRequestHandler):
                 self._send_json({"error": "forbidden"}, 403)
                 return
             eng = self.state.engine
+            models = eng.profile.get("models", [])
             self._send_json({
                 "profile_source": eng.profile_source,
                 "gateway_name": eng.profile.get("gateway_name", "AI Gate"),
-                "model_count": len(eng.profile.get("models", [])),
-                "installed": [{"id": a.harness_id, "name": a.display_name}
-                              for a in eng.installed()],
+                "model_count": len(models),
+                "models": [{"id": m.get("id"), "display": m.get("display") or m.get("id")}
+                           for m in models],
+                "gateway_url": eng.profile.get("base_url", {}).get("canonical_root", ""),
+                "runtime": installer.check_runtime(eng.env),
+                "clients": [_client_meta(eng, a) for a in ALL_ADAPTERS],
             })
             return
         self._send(404, b"not found", "text/plain; charset=utf-8")
+
+    def _body(self) -> Dict[str, Any]:
+        length = int(self.headers.get("Content-Length", 0))
+        try:
+            return json.loads(self.rfile.read(length) or b"{}")
+        except json.JSONDecodeError:
+            return {}
 
     def do_POST(self):
         path = self.path.split("?", 1)[0]
         if not self._authorized():
             self._send_json({"error": "forbidden"}, 403)
             return
-        length = int(self.headers.get("Content-Length", 0))
-        try:
-            payload = json.loads(self.rfile.read(length) or b"{}")
-        except json.JSONDecodeError:
-            payload = {}
+        payload = self._body()
+
+        # 安装命令可能跑好几分钟，不能在全局锁里做（会卡住 state/check 等请求）
+        if path == "/api/install_run":
+            client_id = payload.get("client_id")
+            try:
+                adapter = get_adapter(client_id) if client_id else None
+            except KeyError:
+                adapter = None
+            if adapter is None:
+                self._send_json({"error": "没有这个客户端。"}, 400)
+                return
+            result = installer.run_install(adapter, env=self.state.engine.env)
+            self._send_json(result)
+            return
 
         with self.state.lock:
+            eng = self.state.engine
+
             if path == "/api/check":
-                report = self.state.engine.run(harness_ids=payload.get("harness_ids"))
+                report = eng.run(client_ids=payload.get("client_ids"))
                 self.state.last_report = report
                 self._send_json(E.report_to_dict(report))
                 return
-            if path == "/api/fix":
-                harness_id = payload.get("harness_id")
+
+            if path == "/api/action":
+                client_id = payload.get("client_id")
+                issue_id = payload.get("issue_id")
                 report = self.state.last_report
-                if not report:
-                    self._send_json({"error": "还没有检查结果，先执行检查"}, 400)
+                issue = None
+                if report and client_id:
+                    target = next((c for c in report.clients if c.client_id == client_id), None)
+                    if target:
+                        issue = next((i for i in target.issues if i.get("id") == issue_id), None)
+                if issue is None:
+                    self._send_json({"error": "没有对应的待修项，请先重新检查。"}, 409)
                     return
-                target = next((h for h in report.harnesses if h.harness_id == harness_id), None)
-                if target is None:
-                    self._send_json({"error": f"没有 {harness_id} 的检查结果"}, 400)
-                    return
-                self._send_json(self.state.engine.fix(harness_id, target.findings))
-                return
-            if path == "/api/apply_choice":
-                harness_id = payload.get("harness_id")
-                field = payload.get("field")
-                value = payload.get("value")
-                if not harness_id or not field or value is None:
-                    self._send_json({"error": "缺少 harness_id/field/value"}, 400)
-                    return
-                self._send_json(self.state.engine.apply_choice(harness_id, field, value))
-                return
-            if path == "/api/generate":
-                harness_id = payload.get("harness_id")
                 try:
-                    generated = self.state.engine.generate_config(harness_id)
-                except Exception as exc:      # noqa: BLE001 —— 生成失败要如实回报
-                    self._send_json({"error": f"生成配置失败：{exc}"}, 500)
+                    result = eng.apply_action(client_id, issue, payload.get("value"))
+                except Exception as exc:      # noqa: BLE001
+                    self._send_json({"error": f"操作失败：{exc}"}, 500)
                     return
-                self._send_json({"path": generated})
+                self._send_json(result)
                 return
+
+            if path == "/api/recheck":
+                client_id = payload.get("client_id")
+                if not client_id:
+                    self._send_json({"error": "缺少 client_id"}, 400)
+                    return
+                try:
+                    client = eng.assess_client(client_id)
+                except Exception as exc:      # noqa: BLE001
+                    self._send_json({"error": f"重新检查失败：{exc}"}, 500)
+                    return
+                self._record_client(asdict(client))
+                self._send_json({"client": asdict(client)})
+                return
+
+            if path == "/api/configure":
+                client_id = payload.get("client_id")
+                if not client_id:
+                    self._send_json({"error": "缺少 client_id"}, 400)
+                    return
+                try:
+                    result = eng.configure_client(client_id, model=payload.get("model"),
+                                                  api_key=payload.get("api_key"))
+                except Exception as exc:      # noqa: BLE001
+                    self._send_json({"error": f"配置失败：{exc}"}, 500)
+                    return
+                if result.get("client"):
+                    self._record_client(result["client"])
+                self._send_json(result)
+                return
+
         self._send_json({"error": "not found"}, 404)
 
 

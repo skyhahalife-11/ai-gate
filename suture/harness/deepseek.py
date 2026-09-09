@@ -100,6 +100,7 @@ class DeepSeekHarnessAdapter(HarnessAdapter):
     harness_id = "deepseek"
     display_name = "DeepSeek Harness"
     config_format = "yaml"
+    binary_name = None        # dsh CLI 的可执行名尚未确认，先不做二进制探测
 
     def detect(self, env=None, home=None, project_dir=None) -> bool:
         env = env if env is not None else os.environ
@@ -220,6 +221,56 @@ class DeepSeekHarnessAdapter(HarnessAdapter):
 
     def writable_paths(self, cfg: HarnessConfig) -> List[str]:
         return [fs.path for fs in cfg.files]
+
+    def install_command(self, env=None) -> Optional[List[str]]:
+        # DeepSeek Harness（dsh）的官方安装命令还没确认到可自动执行的程度，
+        # 先返回 None——界面只给引导，避免给用户跑一条没验证过的命令。
+        return None
+
+    def install_guide(self, env=None) -> str:
+        return ("DeepSeek Harness（dsh）的官方安装命令待确认。请先从官方渠道获取它的"
+                "安装方式；装好后回这个页面点「重新探测」。网关插件用 "
+                "@deepseek-ai/dsh-llm-pi-ai，路由写在 ~/.dsh 的 settings.yaml 里。")
+
+    def key_store_guide(self, env=None) -> str:
+        return ("DeepSeek Harness 的 Key 存在 ~/.dsh/.credentials.yaml 的 refs 段里，"
+                "配置中的 apiKeyEnv 指向它的变量名（AI_GATE_API_KEY）。")
+
+    def store_key(self, cfg: HarnessConfig, key: str,
+                  env=None, home=None, project_dir=None) -> Tuple[List[str], List[str], str]:
+        """DeepSeek：Key 本体写进 .credentials.yaml 的 refs.AI_GATE_API_KEY（权限 600），
+        并确保用户层 settings.yaml 的 apiKeyEnv 指向这个变量名。"""
+        env = env if env is not None else os.environ
+        home = resolve_home(home, env)
+        hh = harness_home(env, home)
+        creds_path = os.path.join(hh, ".credentials.yaml")
+        creds: Dict[str, Any] = {"version": 1, "refs": {}}
+        if os.path.exists(creds_path):
+            try:
+                with open(creds_path, "r", encoding="utf-8") as f:
+                    parsed = yaml.parse(f.read())
+                if isinstance(parsed, dict):
+                    creds = dict(parsed)
+                    if not isinstance(creds.get("refs"), dict):
+                        creds["refs"] = {}
+            except (yaml.MiniYamlError, OSError):
+                creds = {"version": 1, "refs": {}}
+        refs = dict(creds.get("refs") or {})
+        refs["AI_GATE_API_KEY"] = key
+        creds["refs"] = refs
+        os.makedirs(hh, exist_ok=True)
+        with open(creds_path, "w", encoding="utf-8") as f:
+            f.write(yaml.dump(creds))
+        try:
+            os.chmod(creds_path, 0o600)
+        except OSError:
+            pass
+
+        steps = self.apply(cfg, {FIELD_AUTH: key}, env=env, home=home, project_dir=project_dir)
+        settings_path = os.path.join(hh, "settings.yaml")
+        return (steps + [f"Key 已存入凭据文件 {creds_path}（权限仅本用户可读）"],
+                [creds_path, settings_path],
+                "改完需重开 DeepSeek Harness 才会读到新的 Key。")
 
     def apply(self, cfg: HarnessConfig, changes: Dict[str, str],
               env=None, home=None, project_dir=None) -> List[str]:

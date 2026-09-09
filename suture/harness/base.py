@@ -6,8 +6,9 @@ checks.py 才能保持与 harness 无关，不必为每个 harness 写一套判�
 from __future__ import annotations
 
 import os
+import shutil
 from dataclasses import dataclass, field
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Tuple
 
 # 三个逻辑字段。各 harness 把自己的原始字段名映射到这三个上。
 FIELD_BASE_URL = "base_url"
@@ -111,11 +112,41 @@ class HarnessAdapter:
     harness_id: str = ""
     display_name: str = ""
     config_format: str = ""      # "json" / "toml" / "yaml"，用于语法检测的措辞
+    binary_name: Optional[str] = None    # 客户端在 PATH 里的命令名；None 表示暂无可靠探测
 
     # ---- 探测 ----
     def detect(self, env=None, home=None, project_dir=None) -> bool:
         """本机是否装了/配置过这个 harness。"""
         raise NotImplementedError
+
+    def detect_binary(self, env=None) -> bool:
+        """是否真的装了客户端的可执行程序（shutil.which 在 PATH 里找，
+        Windows 会按 PATHEXT 自动找到 .cmd/.exe）。
+
+        这跟 detect()（探测配置痕迹）是两回事：detect_binary 用于区分
+        「没装客户端」和「装了但没配置」——前者引导去安装，后者引导去配置。
+        测试或特殊部署用 SUTURE_BINARY_OVERRIDE_<HARNESS_ID> 覆盖。"""
+        env = env if env is not None else os.environ
+        flag = env.get(f"SUTURE_BINARY_OVERRIDE_{self.harness_id.upper()}")
+        if flag is not None:
+            return flag.strip().lower() in ("1", "true", "yes", "on")
+        if not self.binary_name:
+            return False
+        return shutil.which(self.binary_name, path=env.get("PATH") or os.environ.get("PATH")) is not None
+
+    # ---- 安装（P3 安装 Tab 用）----
+    def install_command(self, env=None) -> Optional[List[str]]:
+        """官方安装命令（以列表形式，可直接 subprocess.run）。
+        返回 None 表示还没有确认可靠的自动安装方式，只能给指引。"""
+        return None
+
+    def install_guide(self, env=None) -> str:
+        """自动安装不可用时的引导文字（去哪个官网、跑什么命令）。"""
+        return ""
+
+    def key_store_guide(self, env=None) -> str:
+        """告诉用户这个客户端的 Key 该怎么存（写到哪 / 设成哪个环境变量）。"""
+        return ""
 
     # ---- 读取 ----
     def read(self, env=None, home=None, project_dir=None) -> HarnessConfig:
@@ -143,6 +174,17 @@ class HarnessAdapter:
         可用的非交互调用方式——那就不做自证，宁可不测，也不去猜一个命令行参数
         然后把失败当成"这台机器有问题"。"""
         return None
+
+    def store_key(self, cfg: HarnessConfig, key: str,
+                  env=None, home=None, project_dir=None) -> Tuple[List[str], List[str], str]:
+        """把用户填的 AI Gate Key 存到「这个客户端真的会去读」的地方。
+
+        返回 (steps, changed_paths, note)：
+          steps        给用户看的操作说明（人话）
+          changed_paths 这次改动了哪些文件（用于先备份/回滚）；只写环境变量时为 []
+          note         额外的提示（比如"需重开终端生效"），没有则 ""
+        注意：这里不负责备份和回滚，那由引擎在调用前基于 changed_paths 处理。"""
+        raise NotImplementedError
 
 
 # ---- 各适配器共用的小工具 ----

@@ -42,6 +42,82 @@ def _resolve(argv: List[str], env: Dict[str, str]) -> Optional[List[str]]:
     return [exe] + list(argv[1:])
 
 
+def _kill_tree(proc: subprocess.Popen) -> None:
+    """Windows 上客户端经常是 launcher + 真正的进程（比如 codex 会再拉起 node），
+    只杀父进程会让子进程继续占着我们刚释放的句柄。用 taskkill /T 把整棵树干掉；
+    非 Windows 直接 kill 即可。"""
+    if os.name == "nt":
+        try:
+            subprocess.run(["taskkill", "/F", "/T", "/PID", str(proc.pid)],
+                           stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+            return
+        except OSError:
+            pass
+    try:
+        proc.kill()
+    except OSError:
+        pass
+
+
+def _capture_run(resolved: List[str], env: Dict[str, str], shown: str,
+                 timeout: float) -> SelfTestResult:
+    """执行自证并捕获输出，保证任何情况下都不会无限期挂起。
+
+    不能用 stdout=PIPE：客户端可能派生孙进程，孙进程会继承管道写端，即使父进程
+    退出、communicate() 也不会收到 EOF，Windows 上会一直等下去。改成把输出写进
+    临时文件，等的是「父进程退出」而不是「管道关闭」，父子/孙进程之间的句柄
+    不再互相牵制。超时则强杀整棵进程树，绝不让孙进程变成孤儿继续跑。"""
+    import tempfile
+
+    creationflags = 0
+    if os.name == "nt":
+        creationflags = (subprocess.CREATE_NEW_PROCESS_GROUP
+                         | getattr(subprocess, "CREATE_NO_WINDOW", 0))
+    with tempfile.TemporaryDirectory() as td:
+        out_path = os.path.join(td, "out")
+        err_path = os.path.join(td, "err")
+        try:
+            with open(out_path, "wb", buffering=0) as fout, \
+                 open(err_path, "wb", buffering=0) as ferr:
+                proc = subprocess.Popen(resolved, env=env, stdin=subprocess.DEVNULL,
+                                        stdout=fout, stderr=ferr,
+                                        creationflags=creationflags)
+                try:
+                    proc.wait(timeout=timeout)
+                except subprocess.TimeoutExpired:
+                    _kill_tree(proc)
+                    try:
+                        proc.wait()
+                    except OSError:
+                        pass
+                    return SelfTestResult(
+                        attempted=True, ok=False, command=shown,
+                        detail=f"客户端自测（{shown}）超过 {int(timeout)} 秒未返回。")
+        except OSError as exc:
+            return SelfTestResult(attempted=True, ok=False, command=shown,
+                                  detail=f"调用客户端失败：{exc}")
+
+        out = _read_tail(out_path)
+        err = _read_tail(err_path)
+        if proc.returncode == 0 and out:
+            return SelfTestResult(attempted=True, ok=True, command=shown,
+                                  detail=f"客户端自测（{shown}）已执行，正常收到回复。")
+        reason = err or out or f"退出码 {proc.returncode}"
+        # 客户端自己的报错原文对排查很有用，但可能很长，截断后原样带上，不改写、不猜。
+        if len(reason) > 300:
+            reason = reason[:300] + "…"
+        return SelfTestResult(attempted=True, ok=False, command=shown,
+                              detail=f"客户端自测（{shown}）已执行，未成功：{reason}")
+
+
+def _read_tail(path: str) -> str:
+    try:
+        with open(path, "rb") as f:
+            return f.read().decode("utf-8", "replace").strip()
+    except OSError:
+        return ""
+
+
 def run(argv: Optional[List[str]], env: Optional[Dict[str, str]] = None,
         timeout: float = DEFAULT_TIMEOUT) -> SelfTestResult:
     env = dict(env if env is not None else os.environ)
@@ -60,25 +136,4 @@ def run(argv: Optional[List[str]], env: Optional[Dict[str, str]] = None,
             detail=f"未在本机找到 {argv[0]} 命令，无法执行客户端自测。")
 
     shown = " ".join(argv)
-    try:
-        proc = subprocess.run(resolved, env=env, timeout=timeout,
-                              stdin=subprocess.DEVNULL,
-                              stdout=subprocess.PIPE, stderr=subprocess.PIPE)
-    except subprocess.TimeoutExpired:
-        return SelfTestResult(attempted=True, ok=False, command=shown,
-                              detail=f"客户端自测（{shown}）超过 {int(timeout)} 秒未返回。")
-    except OSError as exc:
-        return SelfTestResult(attempted=True, ok=False, command=shown,
-                              detail=f"调用客户端失败：{exc}")
-
-    out = (proc.stdout or b"").decode("utf-8", "replace").strip()
-    err = (proc.stderr or b"").decode("utf-8", "replace").strip()
-    if proc.returncode == 0 and out:
-        return SelfTestResult(attempted=True, ok=True, command=shown,
-                              detail=f"客户端自测（{shown}）已执行，正常收到回复。")
-    reason = err or out or f"退出码 {proc.returncode}"
-    # 客户端自己的报错原文对排查很有用，但可能很长，截断后原样带上，不改写、不猜。
-    if len(reason) > 300:
-        reason = reason[:300] + "…"
-    return SelfTestResult(attempted=True, ok=False, command=shown,
-                          detail=f"客户端自测（{shown}）已执行，未成功：{reason}")
+    return _capture_run(resolved, env, shown, timeout)

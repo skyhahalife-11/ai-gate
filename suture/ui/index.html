@@ -3,7 +3,7 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>Suture · AI Gate 配置体检</title>
+<title>Suture · AI Gate 连通体检</title>
 <style>
   :root {
     --bg: #FAF9F5;
@@ -32,7 +32,7 @@
       --ink: #F0EEE6; --ink-muted: #A3A29C; --border: #38382F;
       --accent: #E08A6B; --accent-hover: #EC9C7E; --accent-soft: #3A2A22;
       --success: #6BBF92; --success-soft: #1D3328;
-      --warning: #D9AC63; --warning-soft: #35291444;
+      --warning: #D9AC63; --warning-soft: #352914;
       --danger: #E8796F; --danger-soft: #3A1F1D;
     }
   }
@@ -42,16 +42,40 @@
     font-family: var(--font-ui); font-size: 14px; line-height: 1.6;
     -webkit-font-smoothing: antialiased;
   }
-  .wrap { max-width: 780px; margin: 0 auto; padding: 40px 24px 72px; }
-  header { margin-bottom: 28px; }
-  h1 { font-size: 1.6rem; margin: 0 0 6px; letter-spacing: -0.01em; }
+  .wrap { max-width: 720px; margin: 0 auto; padding: 32px 22px 64px; }
+  header { margin-bottom: 18px; }
+  h1 { font-size: 1.5rem; margin: 0 0 4px; letter-spacing: -0.01em; }
   .sub { color: var(--ink-muted); font-size: 0.88rem; margin: 0; }
   .mono { font-family: var(--font-mono); }
+
+  /* ---- 顶部 Tab 导航 ---- */
+  .tabs { display: flex; gap: 4px; border-bottom: 1px solid var(--border); margin-bottom: 20px; }
+  .tab {
+    font: inherit; font-size: 0.95rem; padding: 9px 16px; cursor: pointer;
+    border: none; background: transparent; color: var(--ink-muted);
+    border-bottom: 2px solid transparent; margin-bottom: -1px; border-radius: 0;
+  }
+  .tab.active { color: var(--ink); font-weight: 600; border-bottom-color: var(--accent); }
+  .tab:focus-visible { outline: 2px solid var(--accent); outline-offset: -2px; }
+  .panel { display: none; }
+  .panel.active { display: block; }
+
+  button { font: inherit; border-radius: var(--radius-ctl); cursor: pointer; border: 1px solid transparent; }
+  button:disabled { opacity: .55; cursor: default; }
+  .btn-primary { background: var(--accent); color: #fff; padding: 11px 22px; }
+  .btn-primary:not(:disabled):hover { background: var(--accent-hover); }
+  .btn-secondary { background: transparent; color: var(--ink); border-color: var(--border); padding: 8px 14px; }
+  .btn-secondary:not(:disabled):hover { background: var(--surface-alt); }
+  .btn-sm { padding: 7px 14px; font-size: 0.86rem; }
+  .btn-block { display: block; width: 100%; margin-top: 14px; }
+  button:focus-visible, input:focus-visible, select:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+
+  .actions { margin: 4px 0 16px; }
 
   .statusbar {
     display: flex; align-items: center; gap: 12px;
     background: var(--surface); border: 1px solid var(--border);
-    border-radius: var(--radius-card); padding: 16px 18px; margin-bottom: 20px;
+    border-radius: var(--radius-card); padding: 14px 16px; margin-bottom: 18px;
   }
   .dot { width: 10px; height: 10px; border-radius: 50%; background: var(--ink-muted); flex: none; }
   .dot.ok { background: var(--success); }
@@ -64,99 +88,126 @@
   .statusbar .title { font-weight: 600; }
   .statusbar .detail { color: var(--ink-muted); font-size: 0.86rem; }
 
-  button {
-    font: inherit; border-radius: var(--radius-ctl); padding: 9px 18px;
-    cursor: pointer; border: 1px solid transparent; transition: background .12s ease;
-  }
-  button:disabled { opacity: .5; cursor: default; }
-  .btn-primary { background: var(--accent); color: #fff; }
-  .btn-primary:not(:disabled):hover { background: var(--accent-hover); }
-  .btn-secondary { background: transparent; color: var(--ink); border-color: var(--border); }
-  .btn-secondary:not(:disabled):hover { background: var(--surface-alt); }
-  .choice-list {
-    display: flex; flex-direction: column; gap: 1px; margin-top: 8px;
-    max-height: 220px; overflow-y: auto; border: 1px solid var(--border);
-    border-radius: var(--radius-ctl); background: var(--border);
-  }
-  .btn-choice-row {
-    display: block; width: 100%; text-align: left; border-radius: 0;
-    background: var(--surface); color: var(--ink);
-    padding: 8px 14px; font-size: 0.86rem; border-color: transparent;
-  }
-  .btn-choice-row:not(:disabled):hover { background: var(--accent-soft); color: var(--accent-hover); }
-  button:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
-  .actions { display: flex; gap: 10px; flex-wrap: wrap; margin-bottom: 24px; }
-
   .card {
     background: var(--surface); border: 1px solid var(--border);
-    border-radius: var(--radius-card); padding: 20px; margin-bottom: 16px;
+    border-radius: var(--radius-card); padding: 16px 18px; margin-bottom: 14px;
   }
-  .card h2 { font-size: 1.05rem; margin: 0 0 4px; }
-  .card .files { color: var(--ink-muted); font-size: 0.82rem; margin-bottom: 14px; }
-  .card .files div { overflow-wrap: anywhere; }
+  .chead { display: flex; align-items: center; gap: 10px; margin-bottom: 6px; flex-wrap: wrap; }
+  .cname { font-weight: 600; font-size: 1.02rem; }
+  .cstate { margin-left: auto; }
 
   .pill {
-    display: inline-block; font-size: 0.74rem; padding: 2px 9px;
-    border-radius: 999px; white-space: nowrap; font-family: var(--font-mono);
+    display: inline-flex; align-items: center; gap: 6px;
+    font-size: 0.78rem; font-weight: 600; padding: 3px 10px;
+    border-radius: 999px; white-space: nowrap;
   }
   .pill.ok { background: var(--success-soft); color: var(--success); }
-  .pill.issue { background: var(--warning-soft); color: var(--warning); }
-  .pill.manual { background: var(--danger-soft); color: var(--danger); }
+  .pill.warn { background: var(--warning-soft); color: var(--warning); }
+  .pill.bad { background: var(--danger-soft); color: var(--danger); }
+  .pill.muted { background: var(--surface-alt); color: var(--ink-muted); }
+  .checkmark { font-size: 0.9rem; }
 
-  .item {
-    display: flex; gap: 12px; padding: 11px 0; border-top: 1px solid var(--border);
-  }
-  .item:first-of-type { border-top: none; }
-  .item .body { flex: 1; min-width: 0; }
-  .item .label { font-weight: 600; }
-  .item .detail { color: var(--ink-muted); overflow-wrap: anywhere; }
-  .item .kv { font-family: var(--font-mono); font-size: 0.82rem; margin-top: 3px; overflow-wrap: anywhere; }
-  .item .kv span { color: var(--ink-muted); }
-  .note { color: var(--ink-muted); font-size: 0.82rem; margin-top: 3px; }
+  .cbody { color: var(--ink-muted); font-size: 0.92rem; }
+  .cbody .lead { color: var(--ink); margin: 0 0 4px; }
 
-  .steps { margin: 14px 0 0; padding: 0; list-style: none; }
-  .steps li { padding: 7px 0 7px 22px; position: relative; color: var(--ink-muted); }
-  .steps li::before {
-    content: ""; position: absolute; left: 4px; top: 15px;
-    width: 7px; height: 7px; border-radius: 50%; background: var(--accent);
+  .issue { border-top: 1px solid var(--border); padding: 12px 0; }
+  .issue:first-child { border-top: none; }
+  .ititle { font-weight: 600; color: var(--ink); }
+  .idetail { color: var(--ink-muted); font-size: 0.9rem; margin-top: 2px; overflow-wrap: anywhere; }
+  .ictl { margin-top: 10px; display: flex; gap: 8px; align-items: center; flex-wrap: wrap; }
+
+  input[type="password"], input[type="text"], select {
+    font: inherit; padding: 8px 10px; border-radius: var(--radius-ctl);
+    border: 1px solid var(--border); background: var(--surface); color: var(--ink);
+    min-width: 220px;
   }
+  select { cursor: pointer; }
+
+  .rowlink {
+    background: none; border: none; color: var(--ink-muted);
+    text-decoration: underline; padding: 0; cursor: pointer; font-size: 0.86rem;
+  }
+  .rowlink:hover { color: var(--accent); }
+
+  .note { color: var(--ink-muted); font-size: 0.86rem; margin-top: 4px; }
+  .note code { font-family: var(--font-mono); background: var(--surface-alt); padding: 1px 5px; border-radius: 4px; }
+
   .result {
-    margin-top: 16px; padding: 14px 16px; border-radius: var(--radius-ctl);
+    margin-top: 12px; padding: 11px 14px; border-radius: var(--radius-ctl);
     border-left: 3px solid var(--accent); background: var(--accent-soft);
-    white-space: pre-line;
+    font-size: 0.9rem; white-space: pre-line; overflow-wrap: anywhere;
   }
   .result.ok { border-color: var(--success); background: var(--success-soft); }
   .result.warn { border-color: var(--warning); background: var(--warning-soft); }
   .result.bad { border-color: var(--danger); background: var(--danger-soft); }
-  .foot { color: var(--ink-muted); font-size: 0.8rem; margin-top: 28px; }
+
+  .configpanel {
+    margin-top: 12px; padding: 14px; border: 1px solid var(--border);
+    border-radius: var(--radius-ctl); background: var(--surface-alt);
+    display: flex; flex-direction: column; gap: 10px;
+  }
+  .configpanel label { font-size: 0.86rem; color: var(--ink-muted); display: flex; flex-direction: column; gap: 4px; }
+  .codebox {
+    font-family: var(--font-mono); font-size: 0.85rem; white-space: pre-wrap;
+    overflow-wrap: anywhere; background: var(--surface); border: 1px solid var(--border);
+    border-radius: var(--radius-ctl); padding: 10px 12px; margin: 6px 0;
+  }
+  .outbox {
+    font-family: var(--font-mono); font-size: 0.82rem; white-space: pre-wrap;
+    overflow-wrap: anywhere; max-height: 260px; overflow-y: auto;
+    background: var(--surface); border: 1px solid var(--border);
+    border-radius: var(--radius-ctl); padding: 10px 12px; margin-top: 10px; color: var(--ink);
+  }
+  .outbox.err { border-color: var(--danger); }
+  .foot { color: var(--ink-muted); font-size: 0.8rem; margin-top: 26px; }
+  .hidden { display: none !important; }
 </style>
 </head>
 <body>
 <div class="wrap">
   <header>
     <h1>Suture</h1>
-    <p class="sub" id="sub">AI Gate 配置体检与一键修复</p>
+    <p class="sub" id="sub">加载中…</p>
   </header>
 
-  <div class="actions">
-    <button class="btn-primary" id="btnCheck">开始检查</button>
-  </div>
+  <nav class="tabs" role="tablist">
+    <button class="tab active" id="tabBtnCheck" role="tab">检查</button>
+    <button class="tab" id="tabBtnInstall" role="tab">安装 / 上手</button>
+  </nav>
 
-  <div class="statusbar">
-    <div class="dot" id="dot"></div>
-    <div class="text">
-      <div class="title" id="statusTitle">准备就绪</div>
-      <div class="detail" id="statusDetail">点「开始检查」，一次验证网关和本机配置。</div>
+  <!-- ============ 检查 Tab ============ -->
+  <section class="panel active" id="panelCheck">
+    <div class="actions">
+      <button class="btn-primary" id="btnCheck">开始检查</button>
     </div>
-  </div>
 
-  <div id="results"></div>
+    <div class="statusbar" id="statusbar">
+      <div class="dot" id="dot"></div>
+      <div class="text">
+        <div class="title" id="statusTitle">准备就绪</div>
+        <div class="detail" id="statusDetail">点「开始检查」，看看这几个客户端能不能连上 AI Gate。</div>
+      </div>
+    </div>
+
+    <div id="results"></div>
+  </section>
+
+  <!-- ============ 安装 / 上手 Tab ============ -->
+  <section class="panel" id="panelInstall">
+    <p class="sub" style="margin:0 0 14px">
+      本机还没装或还不会用的客户端，在这里装好、配好网关，就能回去「检查」。
+    </p>
+    <div id="installList"></div>
+  </section>
+
   <p class="foot" id="foot"></p>
 </div>
 
 <script>
 const TOKEN = "__SUTURE_TOKEN__";
 const $ = (id) => document.getElementById(id);
+const STATE = { models: [], clients: [] };      // /api/state 的静态信息
+let lastReport = null;                          // 最近一次 /api/check 的报告
 
 async function api(path, body) {
   const res = await fetch(path, {
@@ -169,32 +220,6 @@ async function api(path, body) {
   return data;
 }
 
-function setStatus(kind, title, detail) {
-  $("dot").className = "dot " + kind;
-  $("statusTitle").textContent = title;
-  $("statusDetail").textContent = detail || "";
-}
-
-// 阶段一（网关本身通不通）跟阶段二（每个客户端逐一体检，在下面的卡片里）是
-// 同一份报告里前后相接的两件事，视觉上也该是同一种"卡片"，不能一个是细文字行、
-// 一个是大卡片——那样即使同一次点击、同一次请求返回，看着也像两份不相关的东西。
-function probeCard(p, gatewayDown) {
-  const card = el("div", "card");
-  const head = el("div");
-  head.style.cssText = "display:flex;align-items:center;gap:10px;margin-bottom:2px";
-  const title = el("h2", null, "网关连通性");
-  title.style.margin = "0";
-  head.appendChild(title);
-  const ok = p.classification === "ok";
-  head.appendChild(el("span", "pill " + (ok ? "ok" : "issue"), ok ? "正常" : "异常"));
-  card.appendChild(head);
-  card.appendChild(el("div", "detail", `${p.detail}（${p.elapsed_ms}ms）`));
-  if (p.classification === "auth_error" && !gatewayDown) {
-    card.appendChild(el("div", "note", "网关返回鉴权错误，这更可能是本地配置的问题，已继续检查本地配置。"));
-  }
-  return card;
-}
-
 function el(tag, cls, text) {
   const n = document.createElement(tag);
   if (cls) n.className = cls;
@@ -202,207 +227,384 @@ function el(tag, cls, text) {
   return n;
 }
 
-function findingRow(f, harnessId, card) {
-  const row = el("div", "item");
-  row.appendChild(el("div", "dot " + (f.ok ? "ok" : "warn")));
-  const body = el("div", "body");
-  body.appendChild(el("div", "label", f.label));
-  body.appendChild(el("div", "detail", f.detail));
-  if (f.current_value || f.suggested_value) {
-    const kv = el("div", "kv");
-    if (f.current_value) {
-      kv.appendChild(el("span", null, "当前值："));
-      kv.appendChild(document.createTextNode(f.current_value + "  "));
-    }
-    if (f.suggested_value && !f.ok) {
-      kv.appendChild(el("span", null, "建议值："));
-      kv.appendChild(document.createTextNode(f.suggested_value));
-    }
-    body.appendChild(kv);
+function setStatus(kind, title, detail) {
+  $("dot").className = "dot " + kind;
+  $("statusTitle").textContent = title;
+  $("statusDetail").textContent = detail || "";
+}
+
+/* ---------------- 页面级状态 ---------------- */
+
+const STATE_UI = {
+  connected:    ["ok",   "可以连接"],
+  blocked:      ["bad",  "连不上"],
+  unconfigured: ["warn", "还没配置"],
+  not_installed:["warn", "还没安装"],
+};
+
+function statePill(client) {
+  const [cls, label] = STATE_UI[client.state] || ["muted", client.state_label || client.state];
+  const pill = el("span", "pill " + cls);
+  if (client.state === "connected") {
+    pill.appendChild(el("span", "checkmark", "✓"));
+    pill.appendChild(document.createTextNode(label));
+  } else {
+    pill.textContent = label;
   }
-  if (f.note) body.appendChild(el("div", "note", f.note));
-  // 有候选值、但 Suture 不该替用户挑的场景：摆成一排可以点的选项，
-  // 不是自动填、也不是纯文字——点哪个才写哪个。
-  // 已经判定正常、但仍然给了候选值的项（比如「没指定模型，不填也能用」），菜单照样渲染，
-  // 只不过这一项本身待在「另外 N 项检查通过」的折叠区里，默认收起——想指定的人点开再选，
-  // 不会一上来就把几十个型号平铺在报告里当成报错。
-  if (f.choices && f.choices.length && f.fix_field) {
-    const menu = el("div", "choice-list");
-    f.choices.forEach((c) => {
-      const btn = el("button", "btn-choice-row", c.label);
-      btn.type = "button";
-      btn.onclick = () => applyChoice(harnessId, f.fix_field, c.value, btn, menu, card);
-      menu.appendChild(btn);
+  return pill;
+}
+
+function modelOptions() {
+  return STATE.models.map((m) => {
+    const opt = document.createElement("option");
+    opt.value = m.id;
+    opt.textContent = m.display || m.id;
+    return opt;
+  });
+}
+
+/* ---------------- 检查 Tab：客户端卡片 ---------------- */
+
+function actionControl(client, issue) {
+  const kind = issue.repair_kind;
+  const wrap = el("div", "ictl");
+  if (kind === "auto") {
+    const b = el("button", "btn-primary btn-sm", "修复");
+    b.dataset.act = "fix"; b.dataset.issue = issue.id;
+    wrap.appendChild(b);
+  } else if (kind === "choice") {
+    const sel = el("select");
+    sel.dataset.ctl = "choiceSel";
+    (issue.choices || []).forEach((c) => {
+      const opt = document.createElement("option");
+      opt.value = c.value; opt.textContent = c.label;
+      sel.appendChild(opt);
     });
-    body.appendChild(menu);
+    if (!sel.options.length) {
+      STATE.models.forEach((m) => {
+        const opt = document.createElement("option");
+        opt.value = m.id; opt.textContent = m.display || m.id;
+        sel.appendChild(opt);
+      });
+    }
+    const b = el("button", "btn-primary btn-sm", "应用选择");
+    b.dataset.act = "choice"; b.dataset.issue = issue.id;
+    wrap.append(el("span", "note", "从网关支持的型号里选一个："), sel, b);
+  } else if (kind === "input") {
+    const inp = document.createElement("input");
+    inp.type = "password"; inp.placeholder = "粘贴 Key…";
+    inp.dataset.ctl = "keyInput";
+    if (issue.prompt) inp.title = issue.prompt;
+    const b = el("button", "btn-primary btn-sm", "保存 Key");
+    b.dataset.act = "input"; b.dataset.issue = issue.id;
+    wrap.append(inp, b);
+  } else {
+    // external / none：在工具外处理，不提供按钮
+    wrap.appendChild(el("div", "note", "这一项需要在 Suture 之外处理。"));
   }
-  row.appendChild(body);
+  return wrap;
+}
+
+function issueRow(client, issue) {
+  const row = el("div", "issue");
+  row.appendChild(el("div", "ititle", issue.title || issue.id));
+  row.appendChild(el("div", "idetail", issue.detail || ""));
+  row.appendChild(actionControl(client, issue));
   return row;
 }
 
-async function applyChoice(harnessId, field, value, btn, menu, card) {
-  const originalLabel = btn.textContent;
-  Array.from(menu.children).forEach((b) => (b.disabled = true));
-  btn.textContent = "正在应用…";
-  setStatus("busy", "正在应用你的选择", "备份原配置 → 写入 → 用修正后的配置重新验证");
-  try {
-    const r = await api("/api/apply_choice", { harness_id: harnessId, field, value });
-    const steps = el("ul", "steps");
-    (r.steps || []).forEach((s) => steps.appendChild(el("li", null, s.detail)));
-    card.appendChild(steps);
-    const kind = r.result === "fixed" ? "ok" : (r.result === "kept_fix" ? "warn" : "bad");
-    card.appendChild(el("div", "result " + kind, r.message));
-    setStatus(kind === "ok" ? "ok" : (kind === "warn" ? "warn" : "bad"),
-      { fixed: "已应用", kept_fix: "已应用（保留）", rolled_back: "已回滚" }[r.result] || "已处理",
-      r.message);
-    menu.remove();
-  } catch (e) {
-    card.appendChild(el("div", "result bad", e.message));
-    Array.from(menu.children).forEach((b) => (b.disabled = false));
-    btn.textContent = originalLabel;
-  }
+function configurePanel() {
+  const panel = el("div", "configpanel");
+  const lblModel = el("label", null, "默认模型");
+  const sel = el("select");
+  sel.dataset.ctl = "cfgModel";
+  modelOptions().forEach((o) => sel.appendChild(o));
+  lblModel.appendChild(sel);
+
+  const lblKey = el("label", null, "网关 Key（在 AI Gate 后台生成）");
+  const keyInp = document.createElement("input");
+  keyInp.type = "password"; keyInp.placeholder = "粘贴 Key…"; keyInp.dataset.ctl = "cfgKey";
+  lblKey.appendChild(keyInp);
+
+  const row = el("div", "ictl");
+  const save = el("button", "btn-primary btn-sm", "保存并测试");
+  save.dataset.act = "configure";
+  const cancel = el("button", "btn-secondary btn-sm", "收起");
+  cancel.dataset.act = "toggle-config";
+  row.append(save, cancel);
+
+  panel.append(lblModel, lblKey, row);
+  return panel;
 }
 
-const RESULT_LABEL = {
-  healthy: ["ok", "一切正常"],
-  issues: ["issue", "发现问题"],
-  manual: ["manual", "需人工处理"],
-  no_config: ["issue", "还没配置过"],
-};
+function cardBody(client) {
+  const body = el("div", "cbody");
+  if (client.state === "connected") {
+    return body;                                    // 通了就只显示绿勾，不罗列
+  }
+  if (client.state === "not_installed") {
+    body.appendChild(el("p", "lead", `本机还没装 ${client.display_name}，先到「安装 / 上手」页装上它。`));
+    const b = el("button", "btn-secondary btn-sm", "去「安装 / 上手」页");
+    b.dataset.act = "goto-install";
+    body.appendChild(b);
+    return body;
+  }
+  if (client.state === "unconfigured") {
+    body.appendChild(el("p", "lead", "已经装好了，但还没配置连 AI Gate。"));
+    const btn = el("button", "btn-primary btn-sm", "配置连接 AI Gate");
+    btn.dataset.act = "toggle-config";
+    const box = el("div", "hidden"); box.dataset.ctl = "configBox";
+    body.append(btn, box);
+    return body;
+  }
+  // blocked
+  body.appendChild(el("p", "lead", client.detail || "当前配置连不上 AI Gate。"));
+  const list = el("div");
+  (client.issues || []).forEach((i) => list.appendChild(issueRow(client, i)));
+  body.appendChild(list);
+  const again = el("button", "rowlink", "处理完后，重新测这个客户端");
+  again.dataset.act = "recheck";
+  body.appendChild(again);
+  return body;
+}
 
-function harnessCard(h) {
-  const card = el("div", "card");
-  const head = el("div");
-  head.style.cssText = "display:flex;align-items:center;gap:10px;margin-bottom:2px";
-  const title = el("h2", null, h.display_name);
-  title.style.margin = "0";
-  head.appendChild(title);
-  const [cls, text] = RESULT_LABEL[h.result] || ["issue", h.result];
-  head.appendChild(el("span", "pill " + cls, text));
+function clientCard(client) {
+  const card = el("section", "card client");
+  card.dataset.client = client.client_id;
+  const head = el("div", "chead");
+  head.appendChild(el("span", "cname", client.display_name));
+  const p = statePill(client);
+  p.classList.add("cstate");
+  head.appendChild(p);
   card.appendChild(head);
-
-  const files = el("div", "files");
-  h.files.forEach((f) => {
-    let state = f.exists ? "存在" : "不存在（该层未配置）";
-    if (f.exists && !f.active) state = "存在但不生效";
-    files.appendChild(el("div", null, `${f.layer}：${f.path} —— ${state}`));
-  });
-  card.appendChild(files);
-
-  if (h.result === "no_config") {
-    card.appendChild(el("div", "detail", "没有找到任何配置——这不是配错了，是还没配置过。"));
-    const btn = el("button", "btn-primary", "帮我生成一份配置");
-    btn.style.marginTop = "12px";
-    const originalLabel = btn.textContent;
-    btn.onclick = async () => {
-      btn.disabled = true;
-      btn.textContent = "正在生成…";
-      try {
-        const r = await api("/api/generate", { harness_id: h.harness_id });
-        const box = el("div", "result ok", `已生成：${r.path}\n请将其中的 Key 替换为网关后台生成的真实值。`);
-        card.appendChild(box);
-        btn.remove();
-      } catch (e) {
-        card.appendChild(el("div", "result bad", e.message));
-        btn.disabled = false;
-        btn.textContent = originalLabel;
-      }
-    };
-    card.appendChild(btn);
-    return card;
-  }
-
-  const issues = h.findings.filter((f) => !f.ok);
-  const oks = h.findings.filter((f) => f.ok);
-  issues.forEach((f) => card.appendChild(findingRow(f, h.harness_id, card)));
-  if (oks.length) {
-    const more = el("details");
-    more.style.marginTop = "10px";
-    const sum = el("summary", null, `另外 ${oks.length} 项检查通过`);
-    sum.style.cssText = "cursor:pointer;color:var(--ink-muted);font-size:.86rem";
-    more.appendChild(sum);
-    oks.forEach((f) => more.appendChild(findingRow(f, h.harness_id, card)));
-    card.appendChild(more);
-  }
-  (h.infos || []).forEach((t) => card.appendChild(el("div", "note", t)));
-  const e2eResults = h.e2e_results && h.e2e_results.length ? h.e2e_results : (h.e2e ? [h.e2e] : []);
-  e2eResults.forEach((r) => {
-    const label = e2eResults.length > 1 ? `端到端真实请求（模型 ${r.model}）` : "端到端真实请求";
-    card.appendChild(el("div", "note", `${label}：${r.detail}（${r.elapsed_ms}ms）`));
-  });
-
-  if (h.fixable_count > 0) {
-    const btn = el("button", "btn-primary", `一键修复（${h.fixable_count} 项）`);
-    btn.style.marginTop = "14px";
-    btn.onclick = () => runFix(h, card, btn);
-    card.appendChild(btn);
-  }
+  card.appendChild(cardBody(client));
   return card;
 }
 
-async function runFix(h, card, btn) {
-  btn.disabled = true;
-  btn.textContent = "正在修复…";
-  setStatus("busy", "正在修复", "备份原配置 → 写入修正值 → 用修正后的配置重新验证");
+/* ---------------- 检查 Tab：动作处理 ---------------- */
+
+function findClientHost(clientId) {
+  return Array.from($("results").querySelectorAll(".client"))
+    .find((n) => n.dataset.client === clientId) || null;
+}
+
+function placeClient(client, extraMsg) {
+  const fresh = clientCard(client);
+  if (extraMsg) fresh.appendChild(extraMsg);
+  const host = findClientHost(client.client_id);
+  if (host && host.parentNode) host.replaceWith(fresh);
+  else $("results").appendChild(fresh);
+  return fresh;
+}
+
+function findIssueButton(card, issueId) {
+  return Array.from(card.querySelectorAll("[data-issue]"))
+    .find((n) => n.dataset.issue === issueId) || null;
+}
+
+async function actFix(card, clientId, issueId, getValue) {
+  const btn = findIssueButton(card, issueId);
+  if (btn) { btn.disabled = true; btn.textContent = "处理中…"; }
+  let value;
+  try { value = getValue ? getValue() : undefined; } catch (e) { value = undefined; }
   try {
-    const r = await api("/api/fix", { harness_id: h.harness_id });
-    const steps = el("ul", "steps");
-    (r.steps || []).forEach((s) => steps.appendChild(el("li", null, s.detail)));
-    card.appendChild(steps);
-    const kind = r.result === "fixed" ? "ok" : (r.result === "kept_fix" ? "warn" : "bad");
-    card.appendChild(el("div", "result " + kind, r.message));
-    setStatus(kind === "ok" ? "ok" : (kind === "warn" ? "warn" : "bad"),
-      { fixed: "修复成功", kept_fix: "修复已保留", rolled_back: "已回滚" }[r.result] || "修复结束",
-      r.message);
-    btn.remove();
+    const r = await api("/api/action", { client_id: clientId, issue_id: issueId, value });
+    const msg = el("div", "result " + (r.result === "fixed" ? "ok" : (r.result === "changed" ? "warn" : "bad")),
+                   r.message);
+    placeClient(r.client, msg);
   } catch (e) {
-    card.appendChild(el("div", "result bad", e.message));
-    btn.disabled = false;
-    btn.textContent = "重试修复";
+    const host = findClientHost(clientId);
+    if (host) host.appendChild(el("div", "result bad", e.message));
+    if (btn) { btn.disabled = false; btn.textContent = "重试"; }
   }
 }
 
-async function check() {
-  $("btnCheck").disabled = true;
-  $("results").innerHTML = "";
-  setStatus("busy", "正在检查", "正在验证网关连通性和本机配置…");
+$("results").addEventListener("click", async (ev) => {
+  const card = ev.target.closest(".client");
+  if (!card) return;
+  const clientId = card.dataset.client;
+  const actEl = ev.target.closest("[data-act]");
+  if (!actEl) return;
+  const act = actEl.dataset.act;
+
+  if (act === "recheck") {
+    actEl.disabled = true;
+    try {
+      const r = await api("/api/recheck", { client_id: clientId });
+      placeClient(r.client);
+    } catch (e) {
+      card.appendChild(el("div", "result bad", e.message));
+      actEl.disabled = false;
+    }
+    return;
+  }
+  if (act === "goto-install") {
+    switchTab("install");
+    return;
+  }
+  if (act === "toggle-config") {
+    const box = card.querySelector('[data-ctl="configBox"]');
+    if (!box) return;
+    if (box.classList.contains("hidden")) {
+      box.classList.remove("hidden");
+      box.replaceChildren(configurePanel());
+    } else {
+      box.classList.add("hidden");
+    }
+    return;
+  }
+  if (act === "configure") {
+    const sel = card.querySelector('[data-ctl="cfgModel"]');
+    const key = card.querySelector('[data-ctl="cfgKey"]');
+    const model = sel ? sel.value : undefined;
+    const apiKey = key ? key.value : "";
+    if (!apiKey) {
+      card.appendChild(el("div", "result bad", "要先把 Key 粘贴进来才能保存。"));
+      return;
+    }
+    actEl.disabled = true; actEl.textContent = "正在保存并测试…";
+    try {
+      const r = await api("/api/configure", { client_id: clientId, model, api_key: apiKey });
+      const msg = el("div", "result " + (r.client && r.client.state === "connected" ? "ok" : "warn"),
+                     r.message + (r.path ? "\n配置写入：" + r.path : ""));
+      placeClient(r.client, msg);
+    } catch (e) {
+      card.appendChild(el("div", "result bad", e.message));
+      actEl.disabled = false; actEl.textContent = "保存并测试";
+    }
+    return;
+  }
+
+  // auto / choice / input 三种动作，共用 /api/action
+  const issueId = actEl.dataset.issue;
+  let getValue = null;
+  if (act === "choice") {
+    const sel = card.querySelector('[data-ctl="choiceSel"]');
+    getValue = () => (sel ? sel.value : undefined);
+  } else if (act === "input") {
+    const inp = card.querySelector('[data-ctl="keyInput"]');
+    getValue = () => {
+      const v = inp ? inp.value : "";
+      if (!v) throw new Error("empty");
+      return v;
+    };
+  }
+  actFix(card, clientId, issueId, getValue);
+});
+
+async function runCheck() {
+  const btn = $("btnCheck");
+  btn.disabled = true;
+  $("results").replaceChildren();
+  setStatus("busy", "正在检查…", "正在探测网关并逐个测试客户端连接。");
   try {
     const report = await api("/api/check", {});
-    const p = report.gateway_probe;
-    if (report.result === "no_harness") {
-      setStatus("warn", "没有探测到支持的客户端", report.message);
-      return;
+    lastReport = report;
+
+    const g = report.gateway;
+    const gw = g ? `网关连通性：${g.ok ? "正常" : g.classification} · ${g.detail}（${g.elapsed_ms}ms）` : "";
+    if (report.gateway_side_down) {
+      setStatus("bad", "AI Gate 网关侧暂时连不上", report.message + (gw ? "　" + gw : ""));
+    } else {
+      const kind = report.result === "healthy" ? "ok" : "warn";
+      setStatus(kind, report.message, gw);
     }
-    if (report.result === "gateway_down") {
-      setStatus("bad", "网关侧问题，未检查本机配置", report.message);
-      if (p) $("results").appendChild(probeCard(p, true));
-      $("results").appendChild(el("div", "result warn", report.message));
-      return;
-    }
-    const summary = {
-      healthy: ["ok", "检查通过"],
-      issues: ["warn", "发现可修复的问题"],
-      manual: ["warn", "需要人工处理"],
-      no_config: ["warn", "还没配置过"],
-    }[report.result] || ["warn", "检查完成"];
-    setStatus(summary[0], summary[1], report.message || "");
-    if (p) $("results").appendChild(probeCard(p, false));
-    report.harnesses.forEach((h) => $("results").appendChild(harnessCard(h)));
+    (report.clients || []).forEach((c) => $("results").appendChild(clientCard(c)));
   } catch (e) {
     setStatus("bad", "检查失败", e.message);
   } finally {
-    $("btnCheck").disabled = false;
-    $("btnCheck").textContent = "重新检查";
+    btn.disabled = false;
+    btn.textContent = "开始检查";
   }
 }
 
-$("btnCheck").onclick = check;
+$("btnCheck").addEventListener("click", runCheck);
 
-api("/api/state").then((s) => {
-  $("sub").textContent =
-    `${s.gateway_name} 配置体检 · 已探测到 ${s.installed.map((i) => i.name).join("、") || "无支持的客户端"}`;
-  $("foot").textContent = `规则来源：${s.profile_source} · 网关当前接入 ${s.model_count} 个型号`;
-}).catch(() => {});
+/* ---------------- Tab 切换 ---------------- */
+
+function switchTab(name) {
+  const check = name === "check";
+  $("tabBtnCheck").classList.toggle("active", check);
+  $("tabBtnInstall").classList.toggle("active", !check);
+  $("panelCheck").classList.toggle("active", check);
+  $("panelInstall").classList.toggle("active", !check);
+  if (!check) renderInstall();
+}
+$("tabBtnCheck").addEventListener("click", () => switchTab("check"));
+$("tabBtnInstall").addEventListener("click", () => switchTab("install"));
+
+/* ---------------- 安装 / 上手 Tab ---------------- */
+
+function installCard(c) {
+  const card = el("section", "card");
+  const head = el("div", "chead");
+  head.appendChild(el("span", "cname", c.display_name));
+  const pill = el("span", "pill " + (c.binary_installed ? "ok" : "muted") + " cstate",
+                  c.binary_installed ? "已安装" : "未安装");
+  head.appendChild(pill);
+  card.appendChild(head);
+
+  const body = el("div", "cbody");
+  if (c.binary_installed) {
+    body.appendChild(el("p", "lead", "已经能在这台机器上找到命令。"));
+    if (c.install_guide) body.appendChild(el("div", "note", c.install_guide));
+    card.appendChild(body);
+    return card;
+  }
+  body.appendChild(el("p", "lead", "本机还没装。装好后回到「检查」页测连接。"));
+  if (c.install_guide) body.appendChild(el("div", "note", c.install_guide));
+  if (c.install_command) {
+    body.appendChild(el("div", "codebox", c.install_command));
+    const b = el("button", "btn-primary btn-sm", "运行安装命令");
+    b.dataset.install = c.client_id;
+    body.appendChild(b);
+    const out = el("div", "outbox hidden");
+    out.dataset.installOut = c.client_id;
+    body.appendChild(out);
+  }
+  card.appendChild(body);
+  return card;
+}
+
+function renderInstall() {
+  const host = $("installList");
+  host.replaceChildren(...STATE.clients.map(installCard));
+}
+
+$("installList").addEventListener("click", async (ev) => {
+  const btn = ev.target.closest("[data-install]");
+  if (!btn) return;
+  const clientId = btn.dataset.install;
+  const out = $("installList").querySelector('[data-install-out="' + clientId + '"]');
+  btn.disabled = true; btn.textContent = "正在安装…（可能需要几分钟）";
+  if (out) { out.classList.remove("hidden"); out.textContent = "开始安装…"; }
+  try {
+    const r = await api("/api/install_run", { client_id: clientId });
+    if (out) {
+      out.textContent = (r.output || "") + (r.message ? "\n" + r.message : "");
+      out.classList.toggle("err", r.ok === false);
+    }
+    $("installList").appendChild(el("div", "result " + (r.ok === false ? "bad" : "warn"),
+      r.ok === false ? "安装没有成功，看上面的输出找原因。" : "命令已执行完。回「检查」页测一下能不能连上。"));
+    await reloadState();
+    renderInstall();            // 刷新已装/未装徽标
+  } catch (e) {
+    if (out) { out.textContent = e.message; out.classList.add("err"); }
+    btn.disabled = false; btn.textContent = "重试安装";
+  }
+});
+
+async function reloadState() {
+  try {
+    const s = await api("/api/state");
+    STATE.models = s.models || [];
+    STATE.clients = s.clients || [];
+    $("sub").textContent = `${s.gateway_name || "AI Gate"} 连通体检 · 已接入 ${s.model_count || 0} 个型号`;
+    $("foot").textContent = `规则来源：${s.profile_source}`;
+  } catch (_) { /* 忽略，保留已有信息 */ }
+}
+
+reloadState();
 </script>
 </body>
 </html>
