@@ -24,9 +24,9 @@ import sys
 from typing import Any, Dict, List, Optional, Tuple
 
 from .base import (
-    ExtraAuthHeader, FIELD_AUTH, FIELD_BASE_URL, FIELD_MODEL, FileState,
-    HarnessAdapter, HarnessConfig, LayerValue, build_resolved, resolve_home,
-    resolve_project_dir,
+    ExtraAuthHeader, FIELD_AUTH, FIELD_BASE_URL, FIELD_EXTRA_HEADER, FIELD_MODEL,
+    FileState, HarnessAdapter, HarnessConfig, LayerValue, build_resolved,
+    resolve_home, resolve_project_dir,
 )
 
 ENV_BASE_URL = "ANTHROPIC_BASE_URL"
@@ -54,6 +54,24 @@ def _parse_custom_headers(raw: str) -> List[Tuple[str, str]]:
 
 def _global_path(home: str) -> str:
     return os.path.join(home, ".claude", "settings.json")
+
+
+def _upsert_token_header(raw: Optional[str], token_value: str) -> str:
+    """在 ANTHROPIC_CUSTOM_HEADERS 的原始文本里把 Token 行设成 token_value，
+    其余头原样保留；原来没有 Token 行就补一行。AI Gate 只从 Token 头读 Key，
+    所以给 Claude Code 存 Key 时也要往这个头里放一份。"""
+    out, found = [], False
+    for line in (raw or "").split("\n"):
+        line = line.strip("\r")
+        name, sep, _ = line.partition(":")
+        if sep and name.strip().lower() == "token":
+            out.append(f"Token: {token_value}")
+            found = True
+        else:
+            out.append(line)
+    if not found:
+        out.append(f"Token: {token_value}")
+    return "\n".join(x for x in out if x.strip())
 
 
 def _project_path(project_dir: str) -> str:
@@ -113,6 +131,7 @@ class ClaudeCodeAdapter(HarnessAdapter):
     display_name = "Claude Code CLI"
     config_format = "json"
     binary_name = "claude"
+    supports_extra_auth_header = True    # 能通过 env 的 ANTHROPIC_CUSTOM_HEADERS 补 Token 头
 
     def detect(self, env=None, home=None, project_dir=None) -> bool:
         env = env if env is not None else os.environ
@@ -229,7 +248,13 @@ class ClaudeCodeAdapter(HarnessAdapter):
             elif logical == FIELD_AUTH:
                 block[ENV_API_KEY] = value
                 block.pop(ENV_AUTH_TOKEN, None)
-                described.append(f"鉴权信息 → 统一填到 {ENV_API_KEY}（写入{target.layer}）")
+                block[ENV_CUSTOM_HEADERS] = _upsert_token_header(block.get(ENV_CUSTOM_HEADERS), value)
+                described.append(f"鉴权信息 → 统一填到 {ENV_API_KEY}，并在 {ENV_CUSTOM_HEADERS} 补上 Token 头"
+                                 f"（AI Gate 只从 Token 头读 Key；写入{target.layer}）")
+            elif logical == FIELD_EXTRA_HEADER:
+                block[ENV_CUSTOM_HEADERS] = _upsert_token_header(block.get(ENV_CUSTOM_HEADERS), value)
+                described.append(f"补上网关要求的 Token 请求头 → 在 {ENV_CUSTOM_HEADERS} 里把 Token 设成"
+                                 f"这个 Key（写入{target.layer}）")
 
         data["env"] = block
         os.makedirs(os.path.dirname(target.path), exist_ok=True)

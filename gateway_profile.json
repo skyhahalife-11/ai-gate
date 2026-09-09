@@ -34,12 +34,12 @@
   },
   "auth": {
     "gateway_issued_key_prefix": "yotta_pk_",
+    "required_header": "Token",
+    "_comment_required_header": "实测确认：AI Gate 当前只从自定义的 Token 请求头读取鉴权 Key（同样一把 Key 放 x-api-key / Authorization 一律 401，放 Token 才 200）。Claude Code CLI 靠 ANTHROPIC_CUSTOM_HEADERS 里带 Token 才能连上；DeepSeek Harness 要在 providers.<路由>.headers 里写 Token。判定和修复都拿这个头当依据；哪天网关改了采信方式，改这里即可，不用动代码。",
     "accepted_headers": [
-      "x-api-key",
-      "Authorization",
       "Token"
     ],
-    "_comment": "网关同时兼容 Anthropic 原生的 x-api-key / Authorization，以及自定义的 Token 头。所以不存在“鉴权头填错位置”这一类必然失败的情况，但两个来源同时填仍然需要提示。",
+    "_comment": "accepted_headers 的语义是「客户端可能用来携带 Key、因而需要单独校验内容的自定义请求头名」。当前只有 Token 一个——其它头即使填了也会被网关忽略，属于“填错位置”而不是可用鉴权。",
     "known_vendor_key_prefixes": {
       "sk-ant-": "Anthropic 官方",
       "sk-proj-": "OpenAI 官方",

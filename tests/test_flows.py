@@ -36,7 +36,7 @@ class TestHealthyPath(unittest.TestCase):
             self.assertEqual(report.result, E.RESULT_HEALTHY)
             c = one_client(report)
             self.assertEqual(c.state, E.STATE_CONNECTED)
-            self.assertEqual(c.state_label, "可以连接")
+            self.assertEqual(c.state_label, "已连接")
             self.assertTrue(c.e2e["ok"])
             self.assertEqual(c.issues, [])          # 成功路径不罗列任何东西
 

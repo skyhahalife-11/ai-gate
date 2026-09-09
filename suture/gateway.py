@@ -46,7 +46,7 @@ def _classify(status: Optional[int], exc: Optional[BaseException]) -> tuple:
         if isinstance(exc, socket.timeout) or isinstance(exc, TimeoutError):
             return "timeout", "请求超时，网关没有在预期时间内响应。"
         if isinstance(exc, urllib.error.URLError):
-            return "network_error", f"无法连接网关，可能是本机网络或代理存在问题：{exc.reason}"
+            return "network_error", "无法连接 AI Gate，请检查网络后重试。"
         return "unknown", f"请求出错：{exc}"
     if status is None:
         return "unknown", "未获取到响应状态。"

@@ -36,7 +36,7 @@ class TestWriteFailure(unittest.TestCase):
                 issue = next(i for i in client.issues if i["id"] == "base_url")
                 result = eng.apply_action("claude_code", issue)
                 self.assertNotEqual(result["result"], E.RESULT_FIXED)
-                self.assertIn("写入配置失败", result["message"])
+                self.assertIn("配置写入失败", result["message"])
                 self.assertEqual(open(path, encoding="utf-8").read(), before)
             finally:
                 os.chmod(path, stat.S_IRUSR | stat.S_IWUSR)
@@ -45,8 +45,8 @@ class TestWriteFailure(unittest.TestCase):
         """至少要保证这条分支在代码里是真的接上了的（root 下也能验证）。"""
         import inspect
         src = inspect.getsource(E.Engine.apply_action)
-        self.assertIn("写入配置失败", src)
-        self.assertIn("原配置未被修改", src)
+        self.assertIn("配置写入失败", src)
+        self.assertIn("原配置未改动", src)
 
 
 class TestProfileHandling(unittest.TestCase):

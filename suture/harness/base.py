@@ -14,7 +14,11 @@ from typing import Any, Dict, List, Optional, Tuple
 FIELD_BASE_URL = "base_url"
 FIELD_AUTH = "auth"
 FIELD_MODEL = "model"
-LOGICAL_FIELDS = [FIELD_BASE_URL, FIELD_AUTH, FIELD_MODEL]
+# 第四个：网关要求把 Key 放进某个请求头、而客户端没这么做时，把 Key 补进那个头
+# （deepseek → providers.<route>.headers.Token；claude_code → env 的
+#  ANTHROPIC_CUSTOM_HEADERS 里补一行 Token）。只由网关 required_header 判定触发。
+FIELD_EXTRA_HEADER = "extra_auth_header"
+LOGICAL_FIELDS = [FIELD_BASE_URL, FIELD_AUTH, FIELD_MODEL, FIELD_EXTRA_HEADER]
 
 
 @dataclass
@@ -113,6 +117,12 @@ class HarnessAdapter:
     display_name: str = ""
     config_format: str = ""      # "json" / "toml" / "yaml"，用于语法检测的措辞
     binary_name: Optional[str] = None    # 客户端在 PATH 里的命令名；None 表示暂无可靠探测
+
+    # 这个客户端能否通过它的配置文件表达「往某个自定义请求头里塞 Key」
+    # （deepseek / claude_code 可以；codex 目前没有这个机制）。为 True 时，
+    # 网关 401 + key 没放进 required_header 会给一条「一键补请求头」的修复，
+    # 否则只给外部处理指引。
+    supports_extra_auth_header: bool = False
 
     # ---- 探测 ----
     def detect(self, env=None, home=None, project_dir=None) -> bool:

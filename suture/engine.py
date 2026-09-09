@@ -39,10 +39,10 @@ STATE_UNCONFIGURED = "unconfigured"
 STATE_NOT_INSTALLED = "not_installed"
 
 STATE_LABEL = {
-    STATE_CONNECTED: "可以连接",
-    STATE_BLOCKED: "连不上",
-    STATE_UNCONFIGURED: "还没配置",
-    STATE_NOT_INSTALLED: "还没安装",
+    STATE_CONNECTED: "已连接",
+    STATE_BLOCKED: "无法连接",
+    STATE_UNCONFIGURED: "未配置",
+    STATE_NOT_INSTALLED: "未安装",
 }
 
 
@@ -82,6 +82,21 @@ def _wire(profile: Dict[str, Any], harness_id: str) -> Dict[str, str]:
 def _probe_dict(p: gateway.ProbeResult) -> Dict[str, Any]:
     return {"ok": p.ok, "classification": p.classification, "status": p.status,
             "detail": p.detail, "elapsed_ms": p.elapsed_ms}
+
+
+def _representative_result(results: List[Dict[str, Any]]) -> Optional[Dict[str, Any]]:
+    """多个候选模型都失败时，取最能代表根因的那一次做归因：
+    鉴权失败（401/403）优先——它决定整条链路能不能用；其次 400/404（模型或路径）；
+    都没有特殊信号才退回最后一次尝试（客户端真实想用的那个模型）。"""
+    if not results:
+        return None
+    for r in results:
+        if r.get("classification") == "auth_error" or r.get("status") in (401, 403):
+            return r
+    for r in results:
+        if r.get("status") in (400, 404):
+            return r
+    return results[-1]
 
 
 def _auth_headers(cfg: Optional[HarnessConfig], fallback_key: Optional[str] = None) -> Dict[str, str]:
@@ -205,15 +220,13 @@ class Engine:
         if not cfg.has_any_config:
             if not binary:
                 return mark(STATE_NOT_INSTALLED,
-                            f"本机没有找到 {adapter.display_name}，也没找到它的配置。"
-                            "到「安装 / 上手」页装上它，再回来连 AI Gate。")
+                            f"未找到 {adapter.display_name}。请先安装，再配置连接。")
             st = self._selftest_dict(adapter)
             if st["attempted"] and st["ok"]:
                 return mark(STATE_CONNECTED,
-                            "客户端没配置网关，但自己实测能正常使用——这种情况下不需要"
-                            "在客户端里填网关地址和 Key。")
+                            "客户端可独立工作，无需在配置中填写网关信息。")
             return mark(STATE_UNCONFIGURED,
-                        f"已安装 {adapter.display_name}，但还没配置连 AI Gate。点「配置连接 AI Gate」。")
+                        f"{adapter.display_name} 已安装，尚未配置连接。")
 
         base_url = cfg.field(FIELD_BASE_URL).value
         wire = _wire(self.profile, client_id)
@@ -226,10 +239,10 @@ class Engine:
                 results.append({"model": m, **_probe_dict(r)})
                 if r.ok:
                     break
-        base.e2e = results[-1] if results else None
+        base.e2e = _representative_result(results)
 
         if base_url and any(r["ok"] for r in results):
-            return mark(STATE_CONNECTED, "当前配置能正常连上 AI Gate。")
+            return mark(STATE_CONNECTED, "已连接 AI Gate。")
 
         # 连不上 → 展开"可能的原因"
         if not base_url:
@@ -237,11 +250,10 @@ class Engine:
                 st = self._selftest_dict(adapter)
                 if st["attempted"] and st["ok"]:
                     return mark(STATE_CONNECTED,
-                                "客户端实测能正常使用——连接是在客户端之外解决的，"
-                                "不需要在客户端里填网关地址和 Key。")
-            base.detail = "客户端里没有可用的网关地址，连不上 AI Gate。先补网关地址或 Key。"
+                                "客户端可独立工作，无需在配置中填写网关信息。")
+            base.detail = "缺少网关地址，无法连接。"
         else:
-            base.detail = "当前配置连不上 AI Gate。下面列出可能的原因，挑一个处理。"
+            base.detail = "当前配置无法连接 AI Gate。"
         base.state = STATE_BLOCKED
         base.state_label = STATE_LABEL[STATE_BLOCKED]
         base.issues = blocked_reasons(cfg, self.profile, base.e2e)
@@ -259,14 +271,14 @@ class Engine:
         if not cfg.has_any_config:
             base.state = STATE_NOT_INSTALLED if not binary else STATE_UNCONFIGURED
             base.state_label = STATE_LABEL[base.state]
-            base.detail = ("网关侧现在也连不上。" + ("装好之后再来连。" if not binary
-                           else "先配置，配置好了再连。"))
+            base.detail = "AI Gate 网关当前不可用，请稍后重试。" + (
+                " 安装完成后再试。" if not binary else " 可先完成配置。")
             return base
-        base.detail = "网关侧连不上，暂不逐项检查本地配置（避免白改）。"
+        base.detail = "AI Gate 网关当前不可用，本地配置未改动。"
         base.issues = [{
-            "id": "gateway-side", "title": "AI Gate 网关侧暂时连不上",
-            "detail": "网关本身连不上（网络或网关侧问题），这次先不用改本地配置。"
-                      "稍后重试；如果一直这样，联系网关值班人员。",
+            "id": "gateway-side", "title": "AI Gate 网关不可用",
+            "detail": "AI Gate 当前不可用，本地配置无需更改。请稍后重试；"
+                      "如持续如此，请联系网关维护人员。",
             "current_value": "", "severity": "high", "repair_kind": "external",
             "fix_field": None, "fix_value": None, "choices": [], "prompt": None}]
         return base
@@ -277,7 +289,7 @@ class Engine:
         report = Report(profile_source=self.profile_source)
         if not adapters:
             report.result = RESULT_NOT_INSTALLED
-            report.message = "本机还没有可检查的客户端。"
+            report.message = "没有可检查的客户端。"
             return report
 
         probe_cfg = None
@@ -292,7 +304,7 @@ class Engine:
         if probe.classification in gateway.GATEWAY_SIDE:
             report.gateway_side_down = True
             report.result = RESULT_GATEWAY_DOWN
-            report.message = "AI Gate 网关本身连不上（网络或网关侧问题），暂时先不用改本地配置。"
+            report.message = "AI Gate 暂时无法连接，请稍后重试。"
             for a in adapters:
                 report.clients.append(self._client_gateway_down(a.harness_id))
             return report
@@ -303,19 +315,19 @@ class Engine:
         states = [c.state for c in report.clients]
         if STATE_BLOCKED in states:
             report.result = RESULT_BLOCKED
-            report.message = "有客户端连不上 AI Gate。展开对应客户端，按原因处理。"
+            report.message = "部分客户端无法连接 AI Gate。"
         elif STATE_UNCONFIGURED in states:
             report.result = RESULT_SETUP
-            report.message = "有客户端装了但还没配置连 AI Gate，先配置它。"
+            report.message = "部分客户端尚未配置。"
         elif all(s == STATE_NOT_INSTALLED for s in states):
             report.result = RESULT_NOT_INSTALLED
-            report.message = "本机还没有这些客户端。到「安装 / 上手」页装一个，就能连 AI Gate。"
+            report.message = "未检测到已安装的客户端。"
         elif STATE_CONNECTED in states:
             report.result = RESULT_HEALTHY
-            report.message = "连上 AI Gate 的客户端能正常使用。"
+            report.message = "所有客户端均可正常连接。"
         else:
             report.result = RESULT_NOT_INSTALLED
-            report.message = "还没有能连上 AI Gate 的客户端。"
+            report.message = "暂无可正常连接的客户端。"
         return report
 
     # ---- 单条动作（auto / choice / input）----
@@ -327,12 +339,12 @@ class Engine:
         steps: List[Dict[str, str]] = []
 
         if kind in ("none", "external"):
-            return {"result": RESULT_MANUAL, "message": issue.get("title") or "这一项需要在工具外处理。",
+            return {"result": RESULT_MANUAL, "message": issue.get("title") or "此步骤需手动完成。",
                     "note": issue.get("detail", ""), "steps": steps, "backup_dir": None}
 
         if kind == "input":
             if not value or not str(value).strip():
-                return {"result": RESULT_MANUAL, "message": "要先把 Key 粘贴进来才能保存。",
+                return {"result": RESULT_MANUAL, "message": "请先输入 Key。",
                         "steps": steps, "backup_dir": None}
             key = str(value).strip()
             manifest = fixer.backup_files(adapter.writable_paths(cfg), home=self.home)
@@ -343,14 +355,14 @@ class Engine:
                     cfg, key, env=self.env, home=self.home, project_dir=self.project_dir)
             except OSError as exc:
                 return {"result": RESULT_MANUAL,
-                        "message": f"保存 Key 失败：{exc}。原配置未被修改，备份在 {manifest.directory}。",
+                        "message": f"Key 保存失败：{exc}。原配置未改动，备份在 {manifest.directory}。",
                         "steps": steps, "backup_dir": manifest.directory}
             steps.extend({"detail": s} for s in store_steps)
             # 让本进程立刻能用这个 Key（Codex/DeepSeek 读 AI_GATE_API_KEY）
             self.env["AI_GATE_API_KEY"] = key
             return self._after_write(client_id, steps, manifest, note,
-                                     "Key 已保存，现在能连上 AI Gate 了。",
-                                     "Key 已保存。仍连不上——展开下面的原因继续处理。")
+                                     "Key 已保存，已连接 AI Gate。",
+                                     "Key 已保存，但连接未成功。请检查其余原因。")
 
         # auto / choice：一次写一个逻辑字段
         if kind == "choice":
@@ -359,7 +371,7 @@ class Engine:
             fix_value = issue.get("fix_value")
         fix_field = issue.get("fix_field")
         if not fix_field or fix_value is None or str(fix_value) == "":
-            return {"result": RESULT_MANUAL, "message": "这一项还需要你选一个具体值。",
+            return {"result": RESULT_MANUAL, "message": "请选择要应用的值。",
                     "steps": steps, "backup_dir": None}
         changes = {str(fix_field): str(fix_value)}
         manifest = fixer.backup_files(adapter.writable_paths(cfg), home=self.home)
@@ -370,12 +382,12 @@ class Engine:
                                         home=self.home, project_dir=self.project_dir)
         except OSError as exc:
             return {"result": RESULT_MANUAL,
-                    "message": f"写入配置失败：{exc}。原配置未被修改，备份在 {manifest.directory}。",
+                    "message": f"配置写入失败：{exc}。原配置未改动，备份在 {manifest.directory}。",
                     "steps": steps, "backup_dir": manifest.directory}
         steps.append({"detail": "；".join(applied) if applied else "没有需要写入的改动"})
         return self._after_write(client_id, steps, manifest, None,
-                                 "已修改，现在能连上 AI Gate 了。",
-                                 "已修改，但仍连不上——按剩下的原因继续，或重测一次。")
+                                 "已修复，已连接 AI Gate。",
+                                 "已修改，但连接未成功。请检查其余原因。")
 
     def _after_write(self, client_id: str, steps, manifest, note: Optional[str],
                      ok_msg: str, pending_msg: str) -> Dict[str, Any]:
@@ -418,11 +430,11 @@ class Engine:
 
         client = self.assess_client(client_id)
         if client.state == STATE_CONNECTED:
-            msg = "配置完成，现在能连上 AI Gate 了。"
+            msg = "配置完成，已连接 AI Gate。"
         elif client.state == STATE_BLOCKED:
-            msg = "配置已生成。还连不上——按下面的原因继续处理。"
+            msg = "配置已保存，但连接未成功。请检查原因。"
         else:
-            msg = "配置已生成。"
+            msg = "配置已保存。"
         return {"path": path, "message": msg, "note": note,
                 "steps": steps, "client": asdict(client)}
 

@@ -1,7 +1,9 @@
 """测试用的假网关，不是交付的一部分。
 
 行为尽量贴近真实网关已经确认过的规则：只认 /v1/messages 路径；
-x-api-key、Authorization、Token 三个鉴权头都认；模型名必须在路由表里。
+模型名必须在路由表里。默认 behavior=ok 时三个鉴权头都认（宽松，便于测其它
+分支）；behavior=token_only 则模拟 AI Gate 真实契约——只从 Token 头取 Key，
+x-api-key / Authorization 一律 401（用于验收「Key 没放进 Token 头」的判定）。
 可以通过 default_behavior 或 X-Mock-Behavior 头控制这次返回什么。
 """
 from __future__ import annotations
@@ -53,15 +55,23 @@ class Handler(BaseHTTPRequestHandler):
         if behavior == "server_error":
             self._reply(500, {"error": "internal error"}); return
 
+        # token_only：模拟 AI Gate 只采信 Token 头，其它头即使带了 key 也 401
+        token_only = behavior == "token_only"
+        if token_only:
+            behavior = "ok"
+
         # 两种端点：Anthropic 形态 <root>/zi/proxy + /v1/messages，
         # OpenAI 形态 <root>/zi/proxy/v1 + /chat/completions
         if self.path not in (f"{BASE_PATH}/v1/messages", f"{BASE_PATH}/v1/chat/completions"):
             self._reply(404, {"error": f"no route for path {self.path}"})
             return
 
-        key = (self.headers.get("x-api-key")
-               or _bearer(self.headers.get("Authorization"))
-               or self.headers.get("Token"))
+        if token_only:
+            key = self.headers.get("Token")
+        else:
+            key = (self.headers.get("x-api-key")
+                   or _bearer(self.headers.get("Authorization"))
+                   or self.headers.get("Token"))
         length = int(self.headers.get("Content-Length", 0))
         raw = self.rfile.read(length) if length else b"{}"
         try:

@@ -123,12 +123,6 @@
   }
   select { cursor: pointer; }
 
-  .rowlink {
-    background: none; border: none; color: var(--ink-muted);
-    text-decoration: underline; padding: 0; cursor: pointer; font-size: 0.86rem;
-  }
-  .rowlink:hover { color: var(--accent); }
-
   .note { color: var(--ink-muted); font-size: 0.86rem; margin-top: 4px; }
   .note code { font-family: var(--font-mono); background: var(--surface-alt); padding: 1px 5px; border-radius: 4px; }
 
@@ -169,7 +163,6 @@
     <h1>Suture</h1>
     <p class="sub" id="sub">加载中…</p>
   </header>
-
   <nav class="tabs" role="tablist">
     <button class="tab active" id="tabBtnCheck" role="tab">检查</button>
     <button class="tab" id="tabBtnInstall" role="tab">安装 / 上手</button>
@@ -184,8 +177,8 @@
     <div class="statusbar" id="statusbar">
       <div class="dot" id="dot"></div>
       <div class="text">
-        <div class="title" id="statusTitle">准备就绪</div>
-        <div class="detail" id="statusDetail">点「开始检查」，看看这几个客户端能不能连上 AI Gate。</div>
+        <div class="title" id="statusTitle">尚未检查</div>
+        <div class="detail" id="statusDetail">点击「开始检查」，检测客户端与 AI Gate 的连接。</div>
       </div>
     </div>
 
@@ -195,12 +188,10 @@
   <!-- ============ 安装 / 上手 Tab ============ -->
   <section class="panel" id="panelInstall">
     <p class="sub" style="margin:0 0 14px">
-      本机还没装或还不会用的客户端，在这里装好、配好网关，就能回去「检查」。
+      安装未就绪的客户端，并配置与 AI Gate 的连接。
     </p>
     <div id="installList"></div>
   </section>
-
-  <p class="foot" id="foot"></p>
 </div>
 
 <script>
@@ -236,10 +227,10 @@ function setStatus(kind, title, detail) {
 /* ---------------- 页面级状态 ---------------- */
 
 const STATE_UI = {
-  connected:    ["ok",   "可以连接"],
-  blocked:      ["bad",  "连不上"],
-  unconfigured: ["warn", "还没配置"],
-  not_installed:["warn", "还没安装"],
+  connected:    ["ok",   "已连接"],
+  blocked:      ["bad",  "无法连接"],
+  unconfigured: ["warn", "未配置"],
+  not_installed:["warn", "未安装"],
 };
 
 function statePill(client) {
@@ -287,20 +278,20 @@ function actionControl(client, issue) {
         sel.appendChild(opt);
       });
     }
-    const b = el("button", "btn-primary btn-sm", "应用选择");
+    const b = el("button", "btn-primary btn-sm", "应用");
     b.dataset.act = "choice"; b.dataset.issue = issue.id;
-    wrap.append(el("span", "note", "从网关支持的型号里选一个："), sel, b);
+    wrap.append(el("span", "note", "选择网关支持的模型："), sel, b);
   } else if (kind === "input") {
     const inp = document.createElement("input");
-    inp.type = "password"; inp.placeholder = "粘贴 Key…";
+    inp.type = "password"; inp.placeholder = "Key";
     inp.dataset.ctl = "keyInput";
     if (issue.prompt) inp.title = issue.prompt;
-    const b = el("button", "btn-primary btn-sm", "保存 Key");
+    const b = el("button", "btn-primary btn-sm", "保存");
     b.dataset.act = "input"; b.dataset.issue = issue.id;
     wrap.append(inp, b);
   } else {
-    // external / none：在工具外处理，不提供按钮
-    wrap.appendChild(el("div", "note", "这一项需要在 Suture 之外处理。"));
+    // external / none：按 detail 的说明在外部手动处理，不提供按钮
+    return null;
   }
   return wrap;
 }
@@ -309,7 +300,8 @@ function issueRow(client, issue) {
   const row = el("div", "issue");
   row.appendChild(el("div", "ititle", issue.title || issue.id));
   row.appendChild(el("div", "idetail", issue.detail || ""));
-  row.appendChild(actionControl(client, issue));
+  const ctl = actionControl(client, issue);
+  if (ctl) row.appendChild(ctl);
   return row;
 }
 
@@ -321,10 +313,11 @@ function configurePanel() {
   modelOptions().forEach((o) => sel.appendChild(o));
   lblModel.appendChild(sel);
 
-  const lblKey = el("label", null, "网关 Key（在 AI Gate 后台生成）");
+  const lblKey = el("label", null, "网关 Key");
   const keyInp = document.createElement("input");
-  keyInp.type = "password"; keyInp.placeholder = "粘贴 Key…"; keyInp.dataset.ctl = "cfgKey";
+  keyInp.type = "password"; keyInp.placeholder = "Key"; keyInp.dataset.ctl = "cfgKey";
   lblKey.appendChild(keyInp);
+  const hint = el("div", "note", "Key 可在 AI Gate 后台生成。");
 
   const row = el("div", "ictl");
   const save = el("button", "btn-primary btn-sm", "保存并测试");
@@ -333,7 +326,7 @@ function configurePanel() {
   cancel.dataset.act = "toggle-config";
   row.append(save, cancel);
 
-  panel.append(lblModel, lblKey, row);
+  panel.append(lblModel, lblKey, hint, row);
   return panel;
 }
 
@@ -343,28 +336,25 @@ function cardBody(client) {
     return body;                                    // 通了就只显示绿勾，不罗列
   }
   if (client.state === "not_installed") {
-    body.appendChild(el("p", "lead", `本机还没装 ${client.display_name}，先到「安装 / 上手」页装上它。`));
-    const b = el("button", "btn-secondary btn-sm", "去「安装 / 上手」页");
+    body.appendChild(el("p", "lead", `未检测到 ${client.display_name}。请先安装。`));
+    const b = el("button", "btn-secondary btn-sm", "前往安装页");
     b.dataset.act = "goto-install";
     body.appendChild(b);
     return body;
   }
   if (client.state === "unconfigured") {
-    body.appendChild(el("p", "lead", "已经装好了，但还没配置连 AI Gate。"));
-    const btn = el("button", "btn-primary btn-sm", "配置连接 AI Gate");
+    body.appendChild(el("p", "lead", `${client.display_name} 已安装，尚未配置连接。`));
+    const btn = el("button", "btn-primary btn-sm", "配置");
     btn.dataset.act = "toggle-config";
     const box = el("div", "hidden"); box.dataset.ctl = "configBox";
     body.append(btn, box);
     return body;
   }
   // blocked
-  body.appendChild(el("p", "lead", client.detail || "当前配置连不上 AI Gate。"));
+  body.appendChild(el("p", "lead", client.detail || "当前配置无法连接 AI Gate。"));
   const list = el("div");
   (client.issues || []).forEach((i) => list.appendChild(issueRow(client, i)));
   body.appendChild(list);
-  const again = el("button", "rowlink", "处理完后，重新测这个客户端");
-  again.dataset.act = "recheck";
-  body.appendChild(again);
   return body;
 }
 
@@ -427,17 +417,6 @@ $("results").addEventListener("click", async (ev) => {
   if (!actEl) return;
   const act = actEl.dataset.act;
 
-  if (act === "recheck") {
-    actEl.disabled = true;
-    try {
-      const r = await api("/api/recheck", { client_id: clientId });
-      placeClient(r.client);
-    } catch (e) {
-      card.appendChild(el("div", "result bad", e.message));
-      actEl.disabled = false;
-    }
-    return;
-  }
   if (act === "goto-install") {
     switchTab("install");
     return;
@@ -459,15 +438,15 @@ $("results").addEventListener("click", async (ev) => {
     const model = sel ? sel.value : undefined;
     const apiKey = key ? key.value : "";
     if (!apiKey) {
-      card.appendChild(el("div", "result bad", "要先把 Key 粘贴进来才能保存。"));
+      card.appendChild(el("div", "result bad", "请先输入 Key。"));
       return;
     }
-    actEl.disabled = true; actEl.textContent = "正在保存并测试…";
+    actEl.disabled = true; actEl.textContent = "正在测试连接…";
     try {
       const r = await api("/api/configure", { client_id: clientId, model, api_key: apiKey });
-      const msg = el("div", "result " + (r.client && r.client.state === "connected" ? "ok" : "warn"),
-                     r.message + (r.path ? "\n配置写入：" + r.path : ""));
-      placeClient(r.client, msg);
+      const cls = r.client && r.client.state === "connected" ? "ok" : "warn";
+      const msg = r.message + (r.path ? "\n配置写入：" + r.path : "");
+      placeClient(r.client, el("div", "result " + cls, msg));
     } catch (e) {
       card.appendChild(el("div", "result bad", e.message));
       actEl.disabled = false; actEl.textContent = "保存并测试";
@@ -496,19 +475,13 @@ async function runCheck() {
   const btn = $("btnCheck");
   btn.disabled = true;
   $("results").replaceChildren();
-  setStatus("busy", "正在检查…", "正在探测网关并逐个测试客户端连接。");
+  setStatus("busy", "正在检查…");
   try {
     const report = await api("/api/check", {});
     lastReport = report;
-
-    const g = report.gateway;
-    const gw = g ? `网关连通性：${g.ok ? "正常" : g.classification} · ${g.detail}（${g.elapsed_ms}ms）` : "";
-    if (report.gateway_side_down) {
-      setStatus("bad", "AI Gate 网关侧暂时连不上", report.message + (gw ? "　" + gw : ""));
-    } else {
-      const kind = report.result === "healthy" ? "ok" : "warn";
-      setStatus(kind, report.message, gw);
-    }
+    const kind = (report.gateway_side_down || report.result === "blocked") ? "bad"
+               : (report.result === "healthy" ? "ok" : "warn");
+    setStatus(kind, report.message);
     (report.clients || []).forEach((c) => $("results").appendChild(clientCard(c)));
   } catch (e) {
     setStatus("bad", "检查失败", e.message);
@@ -546,13 +519,13 @@ function installCard(c) {
 
   const body = el("div", "cbody");
   if (c.binary_installed) {
-    body.appendChild(el("p", "lead", "已经能在这台机器上找到命令。"));
-    if (c.install_guide) body.appendChild(el("div", "note", c.install_guide));
+    body.appendChild(el("p", "lead", c.config_present
+      ? "已安装并完成配置。可返回「检查」页查看连接。"
+      : "已安装。可返回「检查」页完成配置。"));
     card.appendChild(body);
     return card;
   }
-  body.appendChild(el("p", "lead", "本机还没装。装好后回到「检查」页测连接。"));
-  if (c.install_guide) body.appendChild(el("div", "note", c.install_guide));
+  body.appendChild(el("p", "lead", "未检测到安装。安装完成后即可在「检查」页检测连接。"));
   if (c.install_command) {
     body.appendChild(el("div", "codebox", c.install_command));
     const b = el("button", "btn-primary btn-sm", "运行安装命令");
@@ -584,8 +557,8 @@ $("installList").addEventListener("click", async (ev) => {
       out.textContent = (r.output || "") + (r.message ? "\n" + r.message : "");
       out.classList.toggle("err", r.ok === false);
     }
-    $("installList").appendChild(el("div", "result " + (r.ok === false ? "bad" : "warn"),
-      r.ok === false ? "安装没有成功，看上面的输出找原因。" : "命令已执行完。回「检查」页测一下能不能连上。"));
+    $("installList").appendChild(el("div", "result " + (r.ok === false ? "bad" : "ok"),
+      r.ok === false ? "安装未完成，请查看上方输出。" : "安装完成。可在「检查」页检测连接。"));
     await reloadState();
     renderInstall();            // 刷新已装/未装徽标
   } catch (e) {
@@ -599,8 +572,7 @@ async function reloadState() {
     const s = await api("/api/state");
     STATE.models = s.models || [];
     STATE.clients = s.clients || [];
-    $("sub").textContent = `${s.gateway_name || "AI Gate"} 连通体检 · 已接入 ${s.model_count || 0} 个型号`;
-    $("foot").textContent = `规则来源：${s.profile_source}`;
+    $("sub").textContent = `客户端与 ${s.gateway_name || "AI Gate"} 的连接检查`;
   } catch (_) { /* 忽略，保留已有信息 */ }
 }
 

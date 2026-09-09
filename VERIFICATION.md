@@ -186,6 +186,24 @@
     不再各占一头。这一行还加了跟卡片其它地方一致的圆点配色（网关本身没问题是绿色，
     鉴权被拒绝这类不阻塞阶段二的情况是黄色，网关侧问题阻塞阶段二时是红色）。
 
+16. **鉴权 401 的归因分不清「Key 放错请求头」和「Key 真失效」，且真实主因会被
+    无关静态问题挤掉。** 2026-09 用真实网关（tower-ai）实测确认：同样一把有效 Key
+    放 x-api-key / Authorization 一律 401，放自定义 Token 头才 200——AI Gate 实际
+    只从 Token 头取 Key。之前 401 一律兜底成「Key 被吊销，重新生成」，对 Key 有效、
+    只是没放进 Token 头的用户是假诊断（DeepSeek 之前就是因为适配器把 Key 放
+    Authorization 而被一直误报「填 Key」）。改成 profile 契约驱动，网关变了只改
+    JSON 不动代码：
+      · gateway_profile.json 的 auth.required_header 声明网关采信哪个头（现为 Token）；
+      · 401 且 Key 前缀合法、但该 Key 没被放进 required_header → 给「一键补请求头」
+        （deepseek 写 providers.<route>.headers.Token；claude_code 写
+        ANTHROPIC_CUSTOM_HEADERS 里的 Token 行），不再直接让用户重新生成 Key；
+      · Key 前缀不对、或补头后仍 401 → 才归成「填 Key / Key 失效」；
+      · blocked_reasons 现在保证 e2e 的真实失败方向（鉴权/模型/网关侧）一定出现在
+        原因清单里，不会被无关静态问题挤掉；
+      · 多候选模型全失败时，取能代表根因的那一次（鉴权失败优先）做归因。
+    新增 tests/test_auth_header.py，用 behavior=token_only 的假网关（只认 Token 头）
+    验收以上分支。
+
 ## 还没验证的
 
 - 六个平台里只在 Linux x64 上实际打包并运行过；其余五个需要在对应机器上跑一次构建。
@@ -198,3 +216,7 @@
 - Codex 的 `base_url` 是否真需要 `/v1` 后缀，按惯例实现，需连一次真实 Codex CLI 确认。
 - 「端到端连通即代表所有模型都可用」这个假设依赖网关对同一个 Key 的所有模型一视同仁，
   没有按模型单独限权限；如果网关实际是按 Key 分模型权限的，需要重新评估。
+- AI Gate「只从 Token 头取 Key」是按 tower-ai 网关实测写进 gateway_profile.json 的
+  auth.required_header。若网关改成也认别的头，更新该字段判定即跟着变。Codex 能否在
+  请求里带自定义 Token 头仍未实测（Codex 走 OpenAI 形态 /chat/completions，跟
+  anthropic 形态的 Token 契约是否一致未知）。

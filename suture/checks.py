@@ -9,8 +9,10 @@ import difflib
 from dataclasses import dataclass, field
 from typing import Any, Dict, List, Optional, Tuple
 
+from .harness import get_adapter
 from .harness.base import (
-    FIELD_AUTH, FIELD_BASE_URL, FIELD_MODEL, HarnessConfig, mask_secret,
+    FIELD_AUTH, FIELD_BASE_URL, FIELD_EXTRA_HEADER, FIELD_MODEL, HarnessConfig,
+    mask_secret,
 )
 from .profile import expected_base_url, expected_base_urls, model_ids, model_index
 
@@ -618,9 +620,73 @@ def _e2e_fallback(cfg: HarnessConfig, profile: Dict[str, Any], e2e: Optional[Dic
     }]
 
 
+def _issue_class(issue_id: str) -> str:
+    """问题属于哪一类，用于判断 e2e 失败方向是否已经被清单覆盖。"""
+    if issue_id == "base_url":
+        return "base_url"
+    if issue_id == "model" or issue_id.startswith("model:"):
+        return "model"
+    if issue_id.startswith("auth"):
+        return "auth"
+    if issue_id == "gateway-side":
+        return "gateway_side"
+    return "other"
+
+
+def _same_class_present(issue_id: str, issues: List[Dict[str, Any]]) -> bool:
+    cls = _issue_class(issue_id)
+    return any(_issue_class(i["id"]) == cls for i in issues)
+
+
+def _auth_header_issue(cfg: HarnessConfig,
+                       profile: Dict[str, Any]) -> Optional[Dict[str, Any]]:
+    """401 且 key 是网关签发的、但配置没把它放进网关要求的请求头时，
+    主因大概率是「放错请求头」而不是「Key 失效」。返回一条可自动补头的问题；
+    不满足条件（没 key / key 前缀不对 / 头已经在发）返回 None。"""
+    auth_rules = profile.get("auth") or {}
+    required = str(auth_rules.get("required_header") or "").strip()
+    if not required:
+        return None
+    key = cfg.field(FIELD_AUTH).value
+    if not key:
+        return None
+    gate_prefix = auth_rules.get("gateway_issued_key_prefix", "")
+    ok_prefix, _why = _check_key_prefix(key, gate_prefix,
+                                        auth_rules.get("known_vendor_key_prefixes", {}))
+    if not ok_prefix:
+        # Key 本身就不是网关签发的 → 主诉是换一个 Key，不是补请求头
+        return None
+    sent = {cfg.auth_header.lower()}
+    sent |= {e.header.lower() for e in cfg.extra_auth_headers}
+    if required.lower() in sent:
+        return None
+    adapter = get_adapter(cfg.harness_id)
+    auto = adapter.supports_extra_auth_header
+    return {
+        "id": "auth-header",
+        "title": f"Key 没放进网关要求的 {required} 请求头",
+        "detail": (f"AI Gate 只从 {required} 请求头读取 Key；当前配置把 Key 放在 "
+                   f"{cfg.auth_header} 头发送（或只放在普通自定义头里），网关读不到，"
+                   "所以即使 Key 有效也会一直 401。"
+                   + ("" if auto else
+                      f" 需要在客户端配置里补上这个 {required} 请求头，Suture 暂时不能自动帮你写。")),
+        "current_value": mask_secret(key),
+        "severity": "high",
+        "repair_kind": "auto" if auto else "external",
+        "fix_field": FIELD_EXTRA_HEADER if auto else None,
+        "fix_value": key if auto else None,
+        "choices": [], "prompt": None,
+    }
+
+
 def blocked_reasons(cfg: HarnessConfig, profile: Dict[str, Any],
                     e2e: Optional[Dict[str, Any]] = None) -> List[Dict[str, Any]]:
     """只在客户端连不上时调用：把静态检查 + 端到端失败特征翻译成可挑选的原因清单。
+
+    除了静态项之外保证两点：
+      · 真实失败方向（鉴权/模型/网关侧）即使被无关静态问题干扰，也必须出现在清单里；
+      · 401 + key 有效但没放进网关要求的头时，用「补请求头」专诊顶替那条
+        「Key 被吊销，重新生成」的误导兜底。
     按严重度降序返回。"""
     hint = e2e_hint(e2e)
     bad = [f for f in run_all_checks(cfg, profile) if not f.ok]
@@ -633,8 +699,22 @@ def blocked_reasons(cfg: HarnessConfig, profile: Dict[str, Any],
         seen.add(it["id"])
         it["severity"] = _severity_for(it["id"], hint)
         issues.append(it)
+
+    if hint == "auth":
+        hi = _auth_header_issue(cfg, profile)
+        if hi is not None:
+            issues = [i for i in issues if not _issue_class(i["id"]) == "auth"]
+            issues.append(hi)
+            seen.add("auth-header")
+
+    fallback = _e2e_fallback(cfg, profile, e2e)
     if not issues:
-        issues = _e2e_fallback(cfg, profile, e2e)
+        issues = fallback
+    elif e2e and fallback:
+        fb = fallback[0]
+        if fb["id"] not in seen and not _same_class_present(fb["id"], issues):
+            issues.append(fb)
+
     order = {"high": 0, "medium": 1, "low": 2}
     issues.sort(key=lambda i: (order.get(i.get("severity", "low"), 3), i["id"]))
     return issues

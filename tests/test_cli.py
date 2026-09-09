@@ -36,7 +36,7 @@ class TestCli(unittest.TestCase):
             r = run_cli(sb, "--yes", "--harness", "claude_code")
             self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
             self.assertIn("Claude Code CLI", r.stdout)
-            self.assertIn("可以连接", r.stdout)
+            self.assertIn("已连接", r.stdout)
 
     def test_fix_flow_prints_steps_and_succeeds(self):
         with Sandbox() as sb:
@@ -71,7 +71,7 @@ class TestCli(unittest.TestCase):
                 "ANTHROPIC_MODEL": "glm-5.3"}})
             r = run_cli(sb, "--yes")
             self.assertEqual(r.returncode, 2, r.stdout)
-            self.assertIn("网关侧问题", r.stdout)
+            self.assertIn("暂时无法连接", r.stdout)
 
     def test_key_is_masked_in_output(self):
         with Sandbox() as sb:

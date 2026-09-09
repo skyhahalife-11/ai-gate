@@ -16,8 +16,9 @@ from typing import Any, Dict, List, Optional, Tuple
 
 from . import _minimal_yaml as yaml
 from .base import (
-    FIELD_AUTH, FIELD_BASE_URL, FIELD_MODEL, FileState, HarnessAdapter,
-    HarnessConfig, LayerValue, build_resolved, resolve_home, resolve_project_dir,
+    ExtraAuthHeader, FIELD_AUTH, FIELD_BASE_URL, FIELD_EXTRA_HEADER, FIELD_MODEL,
+    FileState, HarnessAdapter, HarnessConfig, LayerValue, build_resolved,
+    resolve_home, resolve_project_dir,
 )
 
 PLUGIN_FULL = "@deepseek-ai/dsh-llm-pi-ai"
@@ -101,6 +102,7 @@ class DeepSeekHarnessAdapter(HarnessAdapter):
     display_name = "DeepSeek Harness"
     config_format = "yaml"
     binary_name = None        # dsh CLI 的可执行名尚未确认，先不做二进制探测
+    supports_extra_auth_header = True    # 能往路由 headers.Token 里补 Key
 
     def detect(self, env=None, home=None, project_dir=None) -> bool:
         env = env if env is not None else os.environ
@@ -199,17 +201,28 @@ class DeepSeekHarnessAdapter(HarnessAdapter):
         cfg.fields[FIELD_AUTH] = build_resolved(
             FIELD_AUTH, [LayerValue(secret_source, "", secret)] if secret else [])
 
-        # 也可能把 Token 直接塞在 headers 里，这是网关文档给的另一种写法
+        # 网关文档给的另一种写法：把 Token 直接塞在路由的 headers 里。
+        # 真实客户端会把这个头原样跟主鉴权一起发出去——所以无论 apiKeyEnv/凭据
+        # 有没有解析到 Key，只要 headers 里有 Token，它就要作为「平行额外请求头」
+        # 被 Suture 一起带上（这正是 AI Gate 唯一采信的那个头）；只有整份配置
+        # 都没填主鉴权时，才把 headers.Token 当主鉴权兜底。
         for fs, rc in ordered:
             headers = rc.get("headers")
-            if isinstance(headers, dict) and headers.get("Token"):
-                if not cfg.fields[FIELD_AUTH].is_set:
-                    cfg.fields[FIELD_AUTH] = build_resolved(
-                        FIELD_AUTH, [LayerValue(f"{fs.layer} 的 headers.Token", fs.path, str(headers["Token"]))])
-                    cfg.auth_header = "Token"
-                    cfg.auth_is_indirect = False
-                    cfg.auth_env_resolved = True
-                break
+            if isinstance(headers, dict):
+                token = headers.get("Token")
+                if token and str(token).strip():
+                    token = str(token).strip()
+                    if not cfg.fields[FIELD_AUTH].is_set:
+                        cfg.fields[FIELD_AUTH] = build_resolved(
+                            FIELD_AUTH, [LayerValue(f"{fs.layer} 的 headers.Token", fs.path, token)])
+                        cfg.auth_header = "Token"
+                        cfg.auth_is_indirect = False
+                        cfg.auth_env_resolved = True
+                    if not any(e.header == "Token" for e in cfg.extra_auth_headers):
+                        cfg.extra_auth_headers.append(ExtraAuthHeader(
+                            header="Token", value=token,
+                            source=f"{fs.layer} 的 headers.Token"))
+                    break
 
         if route is None and any(f.exists for f in (base, user)):
             cfg.notes.append(
@@ -268,7 +281,7 @@ class DeepSeekHarnessAdapter(HarnessAdapter):
 
         steps = self.apply(cfg, {FIELD_AUTH: key}, env=env, home=home, project_dir=project_dir)
         settings_path = os.path.join(hh, "settings.yaml")
-        return (steps + [f"Key 已存入凭据文件 {creds_path}（权限仅本用户可读）"],
+        return (steps + [f"Key 已存入凭据文件 {creds_path}（权限仅本用户可读）。"],
                 [creds_path, settings_path],
                 "改完需重开 DeepSeek Harness 才会读到新的 Key。")
 
@@ -301,9 +314,18 @@ class DeepSeekHarnessAdapter(HarnessAdapter):
                 described.append(f"模型清单 → {value}（写入用户层 settings.yaml 的 providers.{route}）")
             elif logical == FIELD_AUTH:
                 rc["apiKeyEnv"] = "AI_GATE_API_KEY"
+                headers = dict(rc.get("headers") or {})
+                headers["Token"] = value
+                rc["headers"] = headers
                 described.append(
-                    f"鉴权引用 → apiKeyEnv 指向 AI_GATE_API_KEY（写入用户层 settings.yaml 的 providers.{route}）；"
-                    "Key 本身存在 .credentials.yaml 或环境变量里，不写进这份配置")
+                    f"鉴权 → apiKeyEnv 指向 AI_GATE_API_KEY，并把 Key 写进 providers.{route} 的 "
+                    "headers.Token（AI Gate 只从 Token 头读 Key；Key 同时存一份在 .credentials.yaml）")
+            elif logical == FIELD_EXTRA_HEADER:
+                headers = dict(rc.get("headers") or {})
+                headers["Token"] = value
+                rc["headers"] = headers
+                described.append(
+                    f"补上网关要求的 Token 请求头 → 把 Key 写进 providers.{route} 的 headers.Token")
 
         providers[route] = rc
         section["providers"] = providers
@@ -312,6 +334,11 @@ class DeepSeekHarnessAdapter(HarnessAdapter):
         os.makedirs(os.path.dirname(path), exist_ok=True)
         with open(path, "w", encoding="utf-8") as f:
             f.write(yaml.dump(data))
+        try:
+            # 这份文件现在可能带着 headers.Token 里的 Key 明文，收紧权限
+            os.chmod(path, 0o600)
+        except OSError:
+            pass
         return described
 
     def generate_minimal_config(self, base_url: str, model: str,
