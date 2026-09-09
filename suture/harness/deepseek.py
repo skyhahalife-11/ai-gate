@@ -105,6 +105,19 @@ class DeepSeekHarnessAdapter(HarnessAdapter):
     supports_extra_auth_header = True    # 能往路由 headers.Token 里补 Key
     can_send_custom_request_headers = True   # 路由的 headers 块就是加自定义头的位置
 
+    def detect_binary(self, env=None) -> bool:
+        """dsh CLI 的可执行名不在 PATH、也没法用 shutil.which 可靠找到（实测本机
+        ~/.dsh 在但 PATH 里没有 dsh 命令）。装了 DeepSeek Harness 的可靠痕迹是
+        harness home（默认 ~/.dsh）目录存在——跟 detect() 用同一套依据。
+
+        不能沿用 base 的实现：binary_name 留空时 base 会直接判 False，安装页的
+        「已安装/未安装」徽标永远显示「未安装」，跟检查页（靠配置痕迹判）结论打架。"""
+        env = env if env is not None else os.environ
+        flag = env.get("SUTURE_BINARY_OVERRIDE_DEEPSEEK")
+        if flag is not None:
+            return flag.strip().lower() in ("1", "true", "yes", "on")
+        return os.path.isdir(harness_home(env, resolve_home(None, env)))
+
     def detect(self, env=None, home=None, project_dir=None) -> bool:
         env = env if env is not None else os.environ
         home = resolve_home(home, env)

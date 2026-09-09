@@ -534,6 +534,10 @@ function installCard(c) {
     const out = el("div", "outbox hidden");
     out.dataset.installOut = c.client_id;
     body.appendChild(out);
+  } else if (c.install_guide) {
+    // 没有可自动执行的官方命令时（如 DeepSeek），把引导文字也渲染出来，
+    // 不然这张卡只剩一句「未检测到安装」，用户不知道该去哪装。
+    body.appendChild(el("p", "note", c.install_guide));
   }
   card.appendChild(body);
   return card;
