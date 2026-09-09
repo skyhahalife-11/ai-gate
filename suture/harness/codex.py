@@ -75,6 +75,9 @@ class CodexAdapter(HarnessAdapter):
     display_name = "Codex CLI"
     config_format = "toml"
     binary_name = "codex"
+    # Codex 没有自定义请求头机制（读配置时已注明），只会把 Key 放 Authorization: Bearer。
+    # 对只认自定义 Token 头的网关（AI Gate）完全不可达 → can_send_custom_request_headers 保持
+    # False 默认值，判定层据此把它的鉴权失败归成「外部处理」而不是引导填 Key/补头。
 
     def detect(self, env=None, home=None, project_dir=None) -> bool:
         env = env if env is not None else os.environ

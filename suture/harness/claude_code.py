@@ -132,6 +132,7 @@ class ClaudeCodeAdapter(HarnessAdapter):
     config_format = "json"
     binary_name = "claude"
     supports_extra_auth_header = True    # 能通过 env 的 ANTHROPIC_CUSTOM_HEADERS 补 Token 头
+    can_send_custom_request_headers = True   # ANTHROPIC_CUSTOM_HEADERS 本身就是加自定义头的位置
 
     def detect(self, env=None, home=None, project_dir=None) -> bool:
         env = env if env is not None else os.environ

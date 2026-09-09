@@ -103,6 +103,7 @@ class DeepSeekHarnessAdapter(HarnessAdapter):
     config_format = "yaml"
     binary_name = None        # dsh CLI 的可执行名尚未确认，先不做二进制探测
     supports_extra_auth_header = True    # 能往路由 headers.Token 里补 Key
+    can_send_custom_request_headers = True   # 路由的 headers 块就是加自定义头的位置
 
     def detect(self, env=None, home=None, project_dir=None) -> bool:
         env = env if env is not None else os.environ

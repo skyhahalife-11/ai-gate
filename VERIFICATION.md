@@ -39,6 +39,7 @@
 | 一键配置全新用户 | 无配置沙箱下 `configure_client` 生成最小配置 + 存 Key → `connected` |
 | 安装执行器 | 官方命令/覆盖命令真实跑并回收输出；缺 Node 给 nodejs.org 引导；无命令只给引导；超时强杀进程树不挂死；未知客户端 400 |
 | 服务端接口 | state 含 3 客户端 + 运行时探测；check→action 修复流；action 先于 check=409；Key 不外泄；recheck/configure/install_run |
+| Codex 契约不可达 | codex 配好地址和 Key、在只认 Token 头的网关上 e2e 仍 401 → 只给单条 external「auth-incompatible」（不再给填 Key/补头）；configure_client 对 codex 直接拒绝、不写配置/env；判定契约驱动（required_header × 适配器能力），required_header 改回 Authorization 时同一个 codex 不算不可达；claude/deepseek 在 token_only 下仍走「补 Token 头」自动修复 |
 | 安全回归 | Key 只以掩码出现；仅 127.0.0.1 + 一次性令牌 |
 
 ### 过程中发现并修掉的问题（这轮新增）
@@ -64,7 +65,11 @@
   PATH 刷新、`claude` 二进制探测边界——npm 全局 bin 进 PATH 后新终端才生效）。
 - Codex 的 `setx AI_GATE_API_KEY` 不可备份/不可回滚，真实机器上只验证了引导文案与
   code 路径（测试环境 env≠os.environ 时不会真的执行 setx）。
-- Codex 的 base_url 是否真需要 `/v1` 后缀、npm 包名，需各连一次真实环境确认。
+- Codex 的 npm 包名与干净机安装端到端仍需确认；base_url 带 `/v1` 后缀已实测确认
+  （真实网关 OpenAI 形态 `/v1/chat/completions` 路由存在、带 Token 头返回 200）。
+- Codex 能否连 AI Gate：已实测定性为「不能」——Codex 没有自定义请求头机制、只发
+  `Authorization`，而网关只认 `Token`（两种形态都只认 Token）。Suture 据此给外部
+  处理，不再引导填 Key（详见下方第 17 条）。
 
 ---
 
@@ -204,6 +209,23 @@
     新增 tests/test_auth_header.py，用 behavior=token_only 的假网关（只认 Token 头）
     验收以上分支。
 
+17. **Codex 对「只认自定义请求头」的网关是契约层面不可达，之前会把它带去填 Key /
+    补头的死循环。** 2026-09-09 在真实网关（tower-ai）做「头隔离」实测钉死：
+    anthropic（`/v1/messages`）和 openai（`/v1/chat/completions`）两种形态都
+    只从自定义 `Token` 请求头取 Key，x-api-key / Authorization 一律 401
+    「个人apikey认证失败」；OpenAI 形态路由真实存在、+Token 返回 200（Codex 的
+    base_url 拼 root+`/v1`+`/chat/completions` 是对的）。但 Codex CLI 没有任何
+    可附加自定义请求头的位置，只会把 Key 放进 `Authorization: Bearer` → 即使
+    Key 正确也永远 401。之前对 codex 的 401 会给出「补 Token 头」外部指引或
+    「填 Key」输入——前者 codex 无从执行、后者填了也白填。改成契约驱动的判定：
+    `auth.required_header` 不在该客户端会发的请求头集合、且该客户端没有能力附加
+    自定义请求头（适配器 `can_send_custom_request_headers=False`，目前只有 codex）
+    → blocked 只给单条 external `auth-incompatible`（说明改用 Claude Code /
+    DeepSeek，或等网关放开其它鉴权头），`configure_client` 对这类客户端直接拒绝、
+    不生成配置也不写环境变量。判定不写死客户端名：哪天网关把 `required_header`
+    改成 Authorization（codex 本来就会发的头），同一个 codex 自动变可修。
+    新增 tests/test_codex_contract.py 验收。
+
 ## 还没验证的
 
 - 六个平台里只在 Linux x64 上实际打包并运行过；其余五个需要在对应机器上跑一次构建。
@@ -213,10 +235,12 @@
   None、直接跳过自证——所以这个客户端在"什么都没配但其实能用"的机器上仍然会报
   "没配置"。确认了正确命令之后补上即可，不需要改其它逻辑。
 - 代码签名与公证尚未接入，证书就绪后需要补上并重新验证 macOS/Windows 的打开流程。
-- Codex 的 `base_url` 是否真需要 `/v1` 后缀，按惯例实现，需连一次真实 Codex CLI 确认。
+- Codex 的 `base_url` 带 `/v1` 后缀已实测确认：真实网关 OpenAI 形态路由
+  `/v1/chat/completions` 存在、带 Token 头返回 200，root + `/v1` + `/chat/completions`
+  的拼法与网关一致。
 - 「端到端连通即代表所有模型都可用」这个假设依赖网关对同一个 Key 的所有模型一视同仁，
   没有按模型单独限权限；如果网关实际是按 Key 分模型权限的，需要重新评估。
-- AI Gate「只从 Token 头取 Key」是按 tower-ai 网关实测写进 gateway_profile.json 的
-  auth.required_header。若网关改成也认别的头，更新该字段判定即跟着变。Codex 能否在
-  请求里带自定义 Token 头仍未实测（Codex 走 OpenAI 形态 /chat/completions，跟
-  anthropic 形态的 Token 契约是否一致未知）。
+- AI Gate「只从 Token 头取 Key」是按 tower-ai 网关「头隔离」实测写进
+  gateway_profile.json 的 auth.required_header，anthropic 与 openai 两种形态都验证过。
+  若网关改成也认别的头，更新该字段判定即跟着变。Codex 不能在请求里带自定义 Token 头
+  （无此机制，已实测定性）→ 判定走「外部处理」，见上方第 17 条。

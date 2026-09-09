@@ -67,7 +67,8 @@ python3 -m unittest discover -s tests -t .
   Token 请求头**等，给「修复」按钮）/ `选模型`（模型不在网关列表，给候选下拉，
   只改目标、保留清单里其它模型）/ `填 Key`（Key 缺失或补头后仍被网关拒绝，
   输入网关后台生成的 Key）/ `外部处理`（例如 Key 得回后台重新生成、Codex 项目
-  要标记可信，只给说明）。处理完用主按钮再跑一次「开始检查」验证。
+  要标记可信、**Codex 这种带不了自定义请求头因而连不上 AI Gate 的客户端**，
+  只给说明）。处理完用主按钮再跑一次「开始检查」验证。
 - **未配置**：装了客户端但没连网关，给「配置」面板（默认模型 + Key）。
 - **未安装**：引导去「安装 / 上手」页装。
 
@@ -99,14 +100,12 @@ python3 -m unittest discover -s tests -t .
   （写前有备份）。
 - **协议版本头检测默认关闭。** 网关是否校验 `anthropic-version` 尚未确认，确认后把
   `gateway_profile.json` 里 `protocol_version.check_enabled` 改成 `true` 即可，不用改代码。
-- **Codex 的 base_url 是否需要 `/v1` 后缀待实测。** 按 OpenAI 兼容协议的惯例应该要带，
-  代码里也是这么处理的，但需要实际连一次 Codex CLI 确认。
-- **AI Gate 只从 `Token` 请求头读 Key（实测），且 Codex 能否在请求里带自定义
-  `Token` 头未确认。** Claude Code CLI 靠 `ANTHROPIC_CUSTOM_HEADERS` 带 Token 头；
-  DeepSeek Harness 把 Token 写在路由的 `headers.Token` 里（Suture 存 Key / 自动补头
-  都会写这里）。Codex 若没有自定义请求头机制，可能得走别的方式才能连这条网关。
-  网关采信哪个头由 `gateway_profile.json` 的 `auth.required_header` 声明，改了它
-  判定会自动跟着变，不用改代码。
+- **Codex 的 base_url 需要 `/v1` 后缀（已实测）。** 网关 OpenAI 形态路由
+  `/v1/chat/completions` 真实存在、带 Token 头可 200，所以 root + `/v1` +
+  `/chat/completions` 的拼法是对的；Codex 连不上 AI Gate 只差在它带不了 Token 头。
+- **AI Gate 只从 `Token` 请求头读 Key，而 Codex 无法携带自定义请求头——Codex 现状连不上 AI Gate（均已实测）。** anthropic（`/v1/messages`）与 openai（`/v1/chat/completions`）两种形态都只认 Token 头；OpenAI 形态路由存在且可用，Codex 的 base_url 拼法（root + `/v1` + `/chat/completions`）是对的。但 Codex CLI 没有可附加自定义请求头的位置，只会把 Key 放进 `Authorization: Bearer` → 一律 401「个人apikey认证失败」。所以 Suture 对 Codex 给「外部处理」说明（改用 Claude Code / DeepSeek，或等网关放开其它头），不引导它填 Key / 补头。Claude Code 靠 `ANTHROPIC_CUSTOM_HEADERS` 带 Token；DeepSeek 写在路由的 `headers.Token`（Suture 存 Key / 补头都写这里）。网关采信哪个头由 `gateway_profile.json` 的 `auth.required_header` 声明，改了它判定自动跟着变。
+- **型号清单没有可拉的端点，目前靠内置快照。** GET `/v1/models`、`/models`、`/v1/model/list` 等对真实网关都返回 404，`profile.py` 的运行时拉取接口也尚未接通（预留）。模型表更新仍走「改 `gateway_profile.json` + 重新分发」，网关哪天提供型号端点，接上 `fetch_remote_profile()` 就能活拉。
+- **DeepSeek Harness 的二进制探测看配置目录，不看 PATH。** 实测本机 `~/.dsh` 存在但 PATH 里没有 `dsh` 命令，所以 `binary_name` 留空、`detect()` 按目录判「已安装」——这比按命令探测可靠（按命令会误报「未安装」）。代价是「没装却留了空配置目录」这种边角会被当成已装，可接受。
 - **DeepSeek Harness 还没确认可自动执行的官方安装命令 / 非交互自证方式。** 装与测
   相关能力对它是给引导而不是自动执行；确认了正确命令后补齐即可，不用改其它逻辑。
 - **签名尚未接入。** macOS 不签名 + 不公证的话 Gatekeeper 会直接拦截，非技术用户打不开；

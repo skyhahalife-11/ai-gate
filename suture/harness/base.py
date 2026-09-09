@@ -124,6 +124,13 @@ class HarnessAdapter:
     # 否则只给外部处理指引。
     supports_extra_auth_header: bool = False
 
+    # 这个客户端自己（不靠 Suture 写配置）有没有一个能附加任意自定义请求头的
+    # 位置（如环境变量 ANTHROPIC_CUSTOM_HEADERS、路由的 headers 块）。为 False
+    # 时它只会把 Key 放进固定的那一个头（codex 是 Authorization: Bearer），
+    # 网关若只认另一个自定义头（AI Gate 的 Token），这个客户端就完全不可达——
+    # 此时连「让用户手动补头 / 填 Key」都是无效引导，只能给外部说明。
+    can_send_custom_request_headers: bool = False
+
     # ---- 探测 ----
     def detect(self, env=None, home=None, project_dir=None) -> bool:
         """本机是否装了/配置过这个 harness。"""

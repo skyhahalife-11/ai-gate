@@ -638,13 +638,63 @@ def _same_class_present(issue_id: str, issues: List[Dict[str, Any]]) -> bool:
     return any(_issue_class(i["id"]) == cls for i in issues)
 
 
+def _required_header(profile: Dict[str, Any]) -> str:
+    return str((profile.get("auth") or {}).get("required_header") or "").strip()
+
+
+def auth_requirement_unsatisfiable(cfg: HarnessConfig,
+                                   profile: Dict[str, Any]) -> bool:
+    """网关要求从某个请求头读 Key，而这个客户端既没在发那个头、也没有任何位置
+    能附加它 → 无论怎么配，这个客户端都连不上这座网关。此时填 Key / 补头都救不了，
+    只能给外部说明（比如 AI Gate 只认 Token，而 Codex 只能发 Authorization）。
+
+    判定是契约驱动的，不是写死客户端名：若哪天 profile 的 required_header 改成一个
+    客户端本来就会发的头（比如 Authorization），这个客户端就不算 unsatisfiable。"""
+    required = _required_header(profile)
+    if not required:
+        return False
+    adapter = get_adapter(cfg.harness_id)
+    if adapter.can_send_custom_request_headers:
+        return False
+    sent = {cfg.auth_header.lower()}
+    sent |= {e.header.lower() for e in cfg.extra_auth_headers}
+    return required.lower() not in sent
+
+
+def auth_incompatible_issue(cfg: HarnessConfig,
+                            profile: Dict[str, Any]) -> Dict[str, Any]:
+    """unsatisfiable 时给的那条「无法用这个客户端连 AI Gate」的原因。"""
+    required = _required_header(profile)
+    name = cfg.display_name or cfg.harness_id
+    sent_name = cfg.auth_header or "普通鉴权头"
+    detail = (
+        f"AI Gate 只从 {required} 请求头读取 Key（x-api-key / Authorization 一律拒绝），"
+        f"而 {name} 的配置里没有能附加自定义请求头的位置——它只会把 Key 放在 "
+        f"{sent_name} 头发送。所以即使 Key 正确，请求也会被网关拒绝（401）。"
+        f"当前这条路走不通：请改用 Claude Code CLI 或 DeepSeek Harness 连接 AI Gate；"
+        f"等 {name} 支持自定义请求头、或网关放开对其它鉴权头的采信后，再回来重新检查。"
+    )
+    return {
+        "id": "auth-incompatible",
+        "title": f"{name} 无法携带 {required} 请求头，连不上 AI Gate",
+        "detail": detail,
+        "current_value": "",
+        "severity": "high",
+        "repair_kind": "external",
+        "fix_field": None,
+        "fix_value": None,
+        "choices": [],
+        "prompt": None,
+    }
+
+
 def _auth_header_issue(cfg: HarnessConfig,
                        profile: Dict[str, Any]) -> Optional[Dict[str, Any]]:
     """401 且 key 是网关签发的、但配置没把它放进网关要求的请求头时，
     主因大概率是「放错请求头」而不是「Key 失效」。返回一条可自动补头的问题；
     不满足条件（没 key / key 前缀不对 / 头已经在发）返回 None。"""
     auth_rules = profile.get("auth") or {}
-    required = str(auth_rules.get("required_header") or "").strip()
+    required = _required_header(profile)
     if not required:
         return None
     key = cfg.field(FIELD_AUTH).value
@@ -689,6 +739,13 @@ def blocked_reasons(cfg: HarnessConfig, profile: Dict[str, Any],
         「Key 被吊销，重新生成」的误导兜底。
     按严重度降序返回。"""
     hint = e2e_hint(e2e)
+
+    # 契约层面就不可达：网关只认某个自定义头、而客户端根本带不了它（codex 之于
+    # AI Gate 的 Token）。补头 / 换 Key 都救不了，任何静态项也都无关紧要——
+    # 直接给单条外部说明，别把用户带去填 Key 的死循环。
+    if hint == "auth" and auth_requirement_unsatisfiable(cfg, profile):
+        return [auth_incompatible_issue(cfg, profile)]
+
     bad = [f for f in run_all_checks(cfg, profile) if not f.ok]
     issues: List[Dict[str, Any]] = []
     seen: set = set()

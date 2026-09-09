@@ -15,7 +15,7 @@ from dataclasses import asdict, dataclass, field
 from typing import Any, Dict, List, Optional
 
 from . import fixer, gateway, selftest
-from .checks import blocked_reasons
+from .checks import auth_incompatible_issue, auth_requirement_unsatisfiable, blocked_reasons
 from .harness import ALL_ADAPTERS, get_adapter
 from .harness.base import FIELD_AUTH, FIELD_BASE_URL, FIELD_MODEL, HarnessConfig
 from .profile import expected_base_url, expected_base_urls, load_profile, model_ids
@@ -408,6 +408,20 @@ class Engine:
     def configure_client(self, client_id: str, model: Optional[str] = None,
                          api_key: Optional[str] = None) -> Dict[str, Any]:
         adapter = get_adapter(client_id)
+        # 契约层面就不可达的客户端（codex 之于 AI Gate）：配了地址和 Key 也连不上，
+        # 生成配置、setx 环境变量都是无效劳动还污染环境——直接说明，什么都不写。
+        probe_cfg = self.read_harness(client_id)
+        if auth_requirement_unsatisfiable(probe_cfg, self.profile):
+            issue = auth_incompatible_issue(probe_cfg, self.profile)
+            client = ClientState(
+                client_id=client_id, display_name=adapter.display_name,
+                state=STATE_UNCONFIGURED, state_label=STATE_LABEL[STATE_UNCONFIGURED],
+                binary_installed=adapter.detect_binary(env=self.env),
+                config_present=probe_cfg.has_any_config,
+                files=self._client_files(probe_cfg))
+            return {"path": None,
+                    "message": f"{adapter.display_name} 无法连接 AI Gate，未保存任何配置。",
+                    "note": issue["detail"], "steps": [], "client": asdict(client)}
         known = model_ids(self.profile)
         pm = self._probe_model()
         pick = model if (model and model in known) else (pm if pm in known else (known[0] if known else ""))
