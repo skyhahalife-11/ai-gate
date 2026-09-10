@@ -17,7 +17,7 @@ from typing import Any, Dict, List, Optional, Tuple
 from . import _minimal_yaml as yaml
 from .base import (
     ExtraAuthHeader, FIELD_AUTH, FIELD_BASE_URL, FIELD_EXTRA_HEADER, FIELD_MODEL,
-    FileState, HarnessAdapter, HarnessConfig, LayerValue, build_resolved,
+    FileState, HarnessAdapter, HarnessConfig, LayerValue, RefuseWrite, build_resolved,
     resolve_home, resolve_project_dir,
 )
 
@@ -45,6 +45,14 @@ def _read_yaml(layer: str, path: str) -> FileState:
     except yaml.MiniYamlError as exc:
         st.parse_ok = False
         st.parse_error = f"YAML 无法安全解析：{exc}"
+    except UnicodeDecodeError:
+        # 记事本一类编辑器存成 ANSI/GBK 就会这样；UnicodeDecodeError 不是 OSError
+        # 的子类，漏掉它整轮检查会直接抛出去。
+        st.parse_ok = False
+        st.parse_error = (
+            "文件不是 UTF-8 编码（多半是被编辑器存成了 ANSI/GBK）。"
+            "请用编辑器把这份文件另存为 UTF-8 编码，再重新检查。"
+        )
     except OSError as exc:
         st.parse_ok = False
         st.parse_error = f"读取失败：{exc}"
@@ -92,7 +100,7 @@ def _dotenv_value(path: str, name: str) -> Optional[str]:
                 k, v = line.split("=", 1)
                 if k.strip() == name:
                     return v.strip().strip("'").strip('"')
-    except OSError:
+    except (OSError, UnicodeDecodeError):
         return None
     return None
 
@@ -282,7 +290,7 @@ class DeepSeekHarnessAdapter(HarnessAdapter):
                     creds = dict(parsed)
                     if not isinstance(creds.get("refs"), dict):
                         creds["refs"] = {}
-            except (yaml.MiniYamlError, OSError):
+            except (yaml.MiniYamlError, UnicodeDecodeError, OSError):
                 creds = {"version": 1, "refs": {}}
         refs = dict(creds.get("refs") or {})
         refs["AI_GATE_API_KEY"] = key
@@ -301,6 +309,11 @@ class DeepSeekHarnessAdapter(HarnessAdapter):
                 [creds_path, settings_path],
                 "改完需重开 DeepSeek Harness 才会读到新的 Key。")
 
+    def unparseable_write_target(self, cfg: HarnessConfig) -> Optional[str]:
+        user_file = next((f for f in cfg.files
+                          if f.layer == "用户层 settings.yaml" and f.exists and not f.parse_ok), None)
+        return user_file.path if user_file is not None else None
+
     def apply(self, cfg: HarnessConfig, changes: Dict[str, str],
               env=None, home=None, project_dir=None) -> List[str]:
         """写用户层 settings.yaml——它覆盖基线，是实际生效的那一层，
@@ -313,7 +326,13 @@ class DeepSeekHarnessAdapter(HarnessAdapter):
 
         data: Dict[str, Any] = {}
         user_file = next((f for f in cfg.files if f.path == path), None)
-        if user_file is not None and user_file.exists and user_file.parse_ok:
+        if user_file is not None and user_file.exists:
+            if not user_file.parse_ok:
+                # 读不懂就写 = 用一份只含本次改动的文件覆盖整份 settings.yaml，
+                # 同文件里别的插件配置和模型清单会被静默清掉。
+                raise RefuseWrite(
+                    f"{path} 读不懂（{user_file.parse_error}）"
+                    "为避免把这份文件里其它配置一起覆盖掉，这里不自动修改。")
             data = dict(user_file.data)
 
         section = dict(data.get(PLUGIN_SECTION) or {})

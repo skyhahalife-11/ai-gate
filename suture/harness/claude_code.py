@@ -25,7 +25,7 @@ from typing import Any, Dict, List, Optional, Tuple
 
 from .base import (
     ExtraAuthHeader, FIELD_AUTH, FIELD_BASE_URL, FIELD_EXTRA_HEADER, FIELD_MODEL,
-    FileState, HarnessAdapter, HarnessConfig, LayerValue, build_resolved,
+    FileState, HarnessAdapter, HarnessConfig, LayerValue, RefuseWrite, build_resolved,
     resolve_home, resolve_project_dir,
 )
 
@@ -116,6 +116,15 @@ def _read_json_file(layer: str, path: str, known_keys: List[str]) -> FileState:
         st.parse_error = (
             f"JSON 格式错误：第 {exc.lineno} 行第 {exc.colno} 列 {exc.msg}。"
             "格式错误会导致整个文件解析失败，这一层的配置全部不生效，不只是出错的那一处。"
+        )
+        st.data = {}
+    except UnicodeDecodeError:
+        # 用记事本一类编辑器存成 ANSI/GBK 就会这样。UnicodeDecodeError 不是
+        # OSError 的子类，漏掉它会让整轮检查直接抛出去、界面上只显示「检查失败」。
+        st.parse_ok = False
+        st.parse_error = (
+            "文件不是 UTF-8 编码（多半是被编辑器存成了 ANSI/GBK）。"
+            "请用编辑器把这份文件另存为 UTF-8 编码，再重新检查。"
         )
         st.data = {}
     except OSError as exc:
@@ -232,10 +241,22 @@ class ClaudeCodeAdapter(HarnessAdapter):
             return project
         return next(f for f in cfg.files if f.layer == "全局配置")
 
+    def unparseable_write_target(self, cfg: HarnessConfig) -> Optional[str]:
+        target = self._target_file(cfg)
+        if target.exists and not target.parse_ok:
+            return target.path
+        return None
+
     def apply(self, cfg: HarnessConfig, changes: Dict[str, str],
               env=None, home=None, project_dir=None) -> List[str]:
         target = self._target_file(cfg)
-        data = dict(target.data) if target.parse_ok else {}
+        if target.exists and not target.parse_ok:
+            # 解析失败的文件 data 是空的，按它起草再整文件写回 = 用一份只含本次
+            # 改动的文件覆盖原文件，同文件里的 permissions/hooks 会被静默抹掉。
+            raise RefuseWrite(
+                f"{target.path} 读不懂（{target.parse_error}）"
+                "为避免把这份文件里其它配置一起覆盖掉，这里不自动修改。")
+        data = dict(target.data)
         block = dict(data.get("env") or {}) if isinstance(data.get("env"), dict) else {}
 
         described: List[str] = []

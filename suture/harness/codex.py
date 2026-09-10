@@ -18,7 +18,8 @@ from typing import Any, Dict, List, Optional, Tuple
 
 from .base import (
     FIELD_AUTH, FIELD_BASE_URL, FIELD_MODEL, FileState, HarnessAdapter,
-    HarnessConfig, LayerValue, build_resolved, resolve_home, resolve_project_dir,
+    HarnessConfig, LayerValue, RefuseWrite, build_resolved, resolve_home,
+    resolve_project_dir,
 )
 
 
@@ -42,6 +43,14 @@ def _read_toml(layer: str, path: str) -> FileState:
         st.parse_error = (
             f"TOML 格式错误：{exc}。"
             "格式错误会导致整个文件解析失败，这一层的配置全部不生效。"
+        )
+    except UnicodeDecodeError:
+        # tomllib 解不了非 UTF-8 的字节流时直接抛 UnicodeDecodeError，它不是
+        # TOMLDecodeError、也不是 OSError 的子类，漏掉会让整轮检查抛出去。
+        st.parse_ok = False
+        st.parse_error = (
+            "文件不是 UTF-8 编码（多半是被编辑器存成了 ANSI/GBK）。"
+            "请用编辑器把这份文件另存为 UTF-8 编码，再重新检查。"
         )
     except OSError as exc:
         st.parse_ok = False
@@ -174,6 +183,12 @@ class CodexAdapter(HarnessAdapter):
             try:
                 with open(target.path, "r", encoding="utf-8") as f:
                     text = f.read()
+            except UnicodeDecodeError:
+                # 这份文件的改动是按文本定点替换的（不动其它内容），但连读都读不出来
+                # 就没法安全地改——如实报错，别把整份文件用别的编码写回去。
+                raise RefuseWrite(
+                    f"{target.path} 不是 UTF-8 编码（多半是被编辑器存成了 ANSI/GBK），"
+                    "为避免把文件内容改坏，这里不自动修改。请先另存为 UTF-8 再试。")
             except OSError:
                 text = ""
 

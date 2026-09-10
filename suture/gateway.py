@@ -6,6 +6,7 @@
 """
 from __future__ import annotations
 
+import http.client
 import json
 import socket
 import time
@@ -46,8 +47,18 @@ def _classify(status: Optional[int], exc: Optional[BaseException]) -> tuple:
         if isinstance(exc, socket.timeout) or isinstance(exc, TimeoutError):
             return "timeout", "请求超时，网关没有在预期时间内响应。"
         if isinstance(exc, urllib.error.URLError):
+            # URLError 有两种：连不上对端（网络/网关侧），和地址本身没法用
+            # （unknown url type）——后者是本地配置问题，不能算网关侧。
+            reason = getattr(exc, "reason", None)
+            if isinstance(reason, str) and "url type" in reason:
+                return "local_error", "网关地址不完整（缺少 http:// 或 https:// 前缀），请求没有发出去。"
             return "network_error", "无法连接 AI Gate，请检查网络后重试。"
-        return "unknown", f"请求出错：{exc}"
+        # 其余（比如 http.client.InvalidURL：请求头里带了换行、地址里有非法字符）
+        # 都是"请求在本机就没构造成功"。这类不能笼统归成网关侧——它的报错原文里
+        # 还可能带着请求头的值（也就是 Key），所以既不外传原文、也不归错方向。
+        if isinstance(exc, http.client.InvalidURL) or isinstance(exc, ValueError):
+            return "local_error", "请求没有发出去：本机这里的地址或鉴权值格式不合法，请检查后重试。"
+        return "unknown", f"请求出错：{type(exc).__name__}"
     if status is None:
         return "unknown", "未获取到响应状态。"
     if 200 <= status < 300:

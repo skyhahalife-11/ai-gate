@@ -17,7 +17,9 @@ from typing import Any, Dict, List, Optional
 from . import fixer, gateway, selftest
 from .checks import auth_incompatible_issue, auth_requirement_unsatisfiable, blocked_reasons
 from .harness import ALL_ADAPTERS, get_adapter
-from .harness.base import FIELD_AUTH, FIELD_BASE_URL, FIELD_MODEL, HarnessConfig
+from .harness.base import (
+    FIELD_AUTH, FIELD_BASE_URL, FIELD_MODEL, HarnessConfig, RefuseWrite,
+)
 from .profile import expected_base_url, expected_base_urls, load_profile, model_ids
 
 # 整体结论（顶部总览 / CLI 退出码用）
@@ -357,6 +359,10 @@ class Engine:
             try:
                 store_steps, _changed, note = adapter.store_key(
                     cfg, key, env=self.env, home=self.home, project_dir=self.project_dir)
+            except RefuseWrite as exc:
+                # 文件读不懂：拒绝写，原文件没被动过，不需要回滚
+                return {"result": RESULT_MANUAL, "message": f"无法保存 Key：{exc}",
+                        "steps": steps, "backup_dir": manifest.directory}
             except OSError as exc:
                 failed = fixer.rollback(manifest)
                 rb = "已按备份恢复原配置。" if not failed else \
@@ -387,6 +393,9 @@ class Engine:
         try:
             applied = fixer.apply_fixes(adapter, cfg, changes, env=self.env,
                                         home=self.home, project_dir=self.project_dir)
+        except RefuseWrite as exc:
+            return {"result": RESULT_MANUAL, "message": f"没有修改配置：{exc}",
+                    "steps": steps, "backup_dir": manifest.directory}
         except OSError as exc:
             failed = fixer.rollback(manifest)
             rb = "已按备份恢复原配置。" if not failed else \
@@ -456,10 +465,16 @@ class Engine:
             manifest = fixer.backup_files(adapter.writable_paths(cfg), home=self.home)
             self._backups[client_id] = manifest
             steps.append({"detail": f"已备份原配置到 {manifest.directory}"})
-            store_steps, _changed, note = adapter.store_key(
-                cfg, key, env=self.env, home=self.home, project_dir=self.project_dir)
-            steps.extend({"detail": s} for s in store_steps)
-            self.env["AI_GATE_API_KEY"] = key
+            try:
+                store_steps, _changed, note = adapter.store_key(
+                    cfg, key, env=self.env, home=self.home, project_dir=self.project_dir)
+            except RefuseWrite as exc:
+                steps.append({"detail": f"Key 未保存：{exc}"})
+            except OSError as exc:
+                steps.append({"detail": f"Key 未保存：{exc}"})
+            else:
+                steps.extend({"detail": s} for s in store_steps)
+                self.env["AI_GATE_API_KEY"] = key
 
         client = self.assess_client(client_id)
         if client.state == STATE_CONNECTED:
@@ -473,5 +488,15 @@ class Engine:
 
 
 def report_to_dict(report: Report) -> Dict[str, Any]:
-    """报告要能直接序列化给界面。Key 在检测层已经掩码，这里不会再引入明文。"""
-    return asdict(report)
+    """报告要能直接序列化给界面。
+
+    这里是唯一出网的出口，所以就地做一次脱敏：issue 里的 `fix_value` 可能是
+    原始 Key（补 Token 头、去掉首尾空白这两条修复的载荷都是它）。界面完全用不到
+    这个字段——点「修复」时前端只发 {client_id, issue_id}，真正的值由服务端从
+    自己那份 last_report 里取。所以出网前统一删掉，Key 在界面/接口返回里永远
+    只以掩码（前 4 + 后 4）的形式出现。"""
+    payload = asdict(report)
+    for client in payload.get("clients") or []:
+        for issue in client.get("issues") or []:
+            issue.pop("fix_value", None)
+    return payload

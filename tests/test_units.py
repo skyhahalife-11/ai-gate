@@ -508,8 +508,10 @@ class TestChecks(unittest.TestCase):
             findings = checks.check_layer_consistency(cfg)
             self.assertEqual(len(findings), 1)
             self.assertFalse(findings[0].ok)
-            self.assertEqual(findings[0].fixable, checks.FIXABLE_YES)
-            self.assertEqual(findings[0].fix_value, "https://project")   # 统一到生效值
+            # 不给一键修复：写的就是生效的那一层（本来就是这个值），写了等于原地
+            # 重写、其它层没被动过，下次检查同一条原因原样回来。
+            self.assertEqual(findings[0].fixable, checks.FIXABLE_NO)
+            self.assertEqual(findings[0].current_value, "https://project")
 
     def test_unknown_key_typo_detected(self):
         with Sandbox() as sb:

@@ -21,6 +21,15 @@ FIELD_EXTRA_HEADER = "extra_auth_header"
 LOGICAL_FIELDS = [FIELD_BASE_URL, FIELD_AUTH, FIELD_MODEL, FIELD_EXTRA_HEADER]
 
 
+class RefuseWrite(Exception):
+    """目标文件读不懂（语法错误）时，适配器拒绝写入。
+
+    这类文件解析失败后 data 是空的，按它起草再整文件写回，就等于用一份只含
+    本次改动的文件覆盖掉原文件——同一份 settings.json 里的 permissions、hooks、
+    mcpServers 会被静默抹掉。宁可写不了、如实告诉用户先修好格式，也不能悄悄清空
+    别人机器上的其它配置。"""
+
+
 @dataclass
 class LayerValue:
     """某一层配置里这个字段的取值。"""
@@ -166,6 +175,13 @@ class HarnessAdapter:
     def key_store_guide(self, env=None) -> str:
         """告诉用户这个客户端的 Key 该怎么存（写到哪 / 设成哪个环境变量）。"""
         return ""
+
+    def unparseable_write_target(self, cfg: HarnessConfig) -> Optional[str]:
+        """修复要写进去的那个文件读不懂时，返回它的路径；能正常写返回 None。
+
+        用途有两个：判定层据此不给出「点了也写不进去」的自动修复按钮，执行层
+        据此拒绝写入（见 RefuseWrite）。三个适配器里只有会整文件重写的需要实现。"""
+        return None
 
     # ---- 读取 ----
     def read(self, env=None, home=None, project_dir=None) -> HarnessConfig:
