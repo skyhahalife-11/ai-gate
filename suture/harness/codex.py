@@ -19,7 +19,7 @@ from typing import Any, Dict, List, Optional, Tuple
 from .base import (
     FIELD_AUTH, FIELD_BASE_URL, FIELD_MODEL, FileState, HarnessAdapter,
     HarnessConfig, LayerValue, RefuseWrite, build_resolved, resolve_home,
-    resolve_project_dir,
+    resolve_project_dir, write_bytes_atomic,
 )
 
 
@@ -174,10 +174,14 @@ class CodexAdapter(HarnessAdapter):
             return project
         return next(f for f in cfg.files if f.layer == "用户级配置")
 
-    def unparseable_write_target(self, cfg: HarnessConfig) -> Optional[str]:
-        """Codex 的 apply 是按文本定点替换的，但目标整份读不出来时同样不能写
-        （apply 里会 RefuseWrite）。判定层据此不给按钮，别让用户点了才知道。
-        只在目标层本来就不会生效时返回（那种情况下 apply 根本不写它）。"""
+    def unparseable_write_target(self, cfg: HarnessConfig,
+                                 fields: Optional[set] = None) -> Optional[str]:
+        """Codex 的字段全落在同一个 config.toml，所以不区分字段。
+
+        判定层据此不给按钮。注意这里比 apply 更严：文件整份读不出来时这里就返回了，
+        而 apply 按文本定点替换、**语法错**那种情况下其实还能写成功——但那份文件本来
+        就是坏的、写进去也连不上，指引（「先修好这个文件」）仍然是对的，所以保持从严，
+        免得给用户一个「点了看起来成功、其实还是连不上」的按钮。"""
         target = self._target_file(cfg)
         if target.exists and not target.parse_ok:
             return target.path
@@ -224,8 +228,8 @@ class CodexAdapter(HarnessAdapter):
                 )
 
         os.makedirs(os.path.dirname(target.path), exist_ok=True)
-        with open(target.path, "w", encoding="utf-8") as f:
-            f.write(text)
+        # 原子替换：进程被中断时也不会留下写了一半的 config.toml
+        write_bytes_atomic(target.path, text.encode("utf-8"))
         return described
 
     def self_test_command(self) -> Optional[List[str]]:
@@ -288,8 +292,7 @@ class CodexAdapter(HarnessAdapter):
             'env_key = "AI_GATE_API_KEY"\n'
             '# Key 本身不写在这里：把它设置成名为 AI_GATE_API_KEY 的环境变量\n'
         )
-        with open(path, "w", encoding="utf-8") as f:
-            f.write(content)
+        write_bytes_atomic(path, content.encode("utf-8"))
         return path
 
 

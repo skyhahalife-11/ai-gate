@@ -18,7 +18,7 @@ from . import _minimal_yaml as yaml
 from .base import (
     ExtraAuthHeader, FIELD_AUTH, FIELD_BASE_URL, FIELD_EXTRA_HEADER, FIELD_MODEL,
     FileState, HarnessAdapter, HarnessConfig, LayerValue, RefuseWrite, build_resolved,
-    resolve_home, resolve_project_dir,
+    resolve_home, resolve_project_dir, write_bytes_atomic,
 )
 
 PLUGIN_FULL = "@deepseek-ai/dsh-llm-pi-ai"
@@ -309,13 +309,14 @@ class DeepSeekHarnessAdapter(HarnessAdapter):
         refs["AI_GATE_API_KEY"] = key
         creds["refs"] = refs
         try:
-            body = yaml.dump(creds)
+            body = yaml.dump(creds).encode("utf-8")
         except yaml.MiniYamlError as exc:
             # 写出器表达不了的值（比如 Key 里带了换行）。此时还没碰过文件。
             raise RefuseWrite(f"无法写入凭据文件：{exc}") from exc
+        except UnicodeEncodeError as exc:
+            raise RefuseWrite(f"无法写入凭据文件：内容编码不成 UTF-8（{exc}）。") from exc
         os.makedirs(hh, exist_ok=True)
-        with open(creds_path, "w", encoding="utf-8") as f:
-            f.write(body)
+        write_bytes_atomic(creds_path, body)
         try:
             os.chmod(creds_path, 0o600)
         except OSError:
@@ -327,11 +328,20 @@ class DeepSeekHarnessAdapter(HarnessAdapter):
                 [creds_path, settings_path],
                 "改完需重开 DeepSeek Harness 才会读到新的 Key。")
 
-    def unparseable_write_target(self, cfg: HarnessConfig) -> Optional[str]:
-        # 存 Key 会写两个文件：用户层 settings.yaml 和 .credentials.yaml（后者不在
-        # cfg.files 的配置层语义里，但 read() 已经把它一起读过了）。任何一个读不懂，
-        # 写进去都是整份覆盖，判定层就不该给「保存 Key」按钮。
-        for layer in ("用户层 settings.yaml", "凭据文件 .credentials.yaml"):
+    def unparseable_write_target(self, cfg: HarnessConfig,
+                                 fields: Optional[set] = None) -> Optional[str]:
+        """存 Key 会写两个文件：用户层 settings.yaml 和 .credentials.yaml（后者不在
+        cfg.files 的配置层语义里，但 read() 已经把它一起读过了）。
+
+        凭据文件只跟鉴权有关——base_url / model 只写 settings.yaml，压根不碰它。
+        所以只有这次要写 auth 类字段时，才把凭据文件的坏状态算进来；否则「一份坏
+        凭据文件」会把 base_url / model 的按钮也一起封掉（判定层说写不了，实际
+        apply 完全能成功，用户白丢一个能用的按钮）。"""
+        targets = ["用户层 settings.yaml"]
+        want = fields if fields is not None else {FIELD_AUTH, FIELD_EXTRA_HEADER}
+        if want & {FIELD_AUTH, FIELD_EXTRA_HEADER}:
+            targets.append("凭据文件 .credentials.yaml")
+        for layer in targets:
             fs = next((f for f in cfg.files if f.layer == layer), None)
             if fs is not None and fs.exists and not fs.parse_ok:
                 return fs.path
@@ -358,9 +368,27 @@ class DeepSeekHarnessAdapter(HarnessAdapter):
                     "为避免把这份文件里其它配置一起覆盖掉，这里不自动修改。")
             data = dict(user_file.data)
 
-        section = dict(data.get(PLUGIN_SECTION) or {})
-        providers = dict(section.get("providers") or {})
-        rc = dict(providers.get(route) or {})
+        # 这几层在文件里可能被写成了别的形态（比如 llm-pi-ai 直接写成一个字符串、
+        # providers 写成列表）。dict(...) 遇到那种会抛 ValueError，而这个异常谁也
+        # 接不住——服务端会变成 500、把 Python 原文甩给用户。读不懂就别写，跟上面
+        # 的 parse_ok 一个口径，只是这里的「读不懂」是结构层面的。
+        section = data.get(PLUGIN_SECTION)
+        if section is not None and not isinstance(section, dict):
+            raise RefuseWrite(
+                f"{path} 里的 {PLUGIN_SECTION} 不是一个键值分块"
+                f"（是{type(section).__name__}），为避免写坏，这里不自动修改。")
+        providers = (section or {}).get("providers")
+        if providers is not None and not isinstance(providers, dict):
+            raise RefuseWrite(
+                f"{path} 里的 {PLUGIN_SECTION}.providers 不是键值形式，为避免写坏，"
+                "这里不自动修改。")
+        rc = (providers or {}).get(route)
+        if rc is not None and not isinstance(rc, dict):
+            raise RefuseWrite(
+                f"{path} 里的 providers.{route} 不是键值形式，为避免写坏，这里不自动修改。")
+        section = dict(section or {})
+        providers = dict(providers or {})
+        rc = dict(rc or {})
 
         described: List[str] = []
         for logical, value in changes.items():
@@ -390,8 +418,17 @@ class DeepSeekHarnessAdapter(HarnessAdapter):
         data[PLUGIN_SECTION] = section
 
         os.makedirs(os.path.dirname(path), exist_ok=True)
-        with open(path, "w", encoding="utf-8") as f:
-            f.write(yaml.dump(data))
+        try:
+            # 先把整份内容序列化好再落盘。写出器可能拒绝某个值（比如带换行的
+            # Key）；这一步放在写文件**之前**，失败时用户的 settings.yaml 一个
+            # 字节都不会动。转成 RefuseWrite 是为了让引擎按「拒绝写入 + 说明原因」
+            # 处理，而不是抛一个谁也接不住的异常、留个半截文件。
+            body = yaml.dump(data).encode("utf-8")
+        except yaml.MiniYamlError as exc:
+            raise RefuseWrite(f"无法写入 {path}：{exc}") from exc
+        except UnicodeEncodeError as exc:
+            raise RefuseWrite(f"无法写入 {path}：内容编码不成 UTF-8（{exc}）。") from exc
+        write_bytes_atomic(path, body)
         try:
             # 这份文件现在可能带着 headers.Token 里的 Key 明文，收紧权限
             os.chmod(path, 0o600)

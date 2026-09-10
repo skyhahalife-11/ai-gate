@@ -35,10 +35,18 @@ def backup_root(home: Optional[str] = None) -> str:
 
 def backup_files(paths: List[str], home: Optional[str] = None) -> BackupManifest:
     stamp = time.strftime("%Y%m%d-%H%M%S")
-    directory = os.path.join(backup_root(home), stamp)
+    root = backup_root(home)
+    # 同一秒内可能备份多次（CLI 的 --yes 会连着做几个自动修复）。以前直接复用
+    # 同名目录，第二次会把第一次备份的文件**覆盖**掉——备份里留下的成了改过之后
+    # 的那版，原始内容反而找不回来，等于白备份。这里保证每次拿到一个新目录。
+    directory = os.path.join(root, stamp)
+    n = 2
+    while os.path.exists(directory):
+        directory = os.path.join(root, f"{stamp}-{n}")
+        n += 1
     os.makedirs(directory, exist_ok=True)
     try:
-        os.chmod(os.path.dirname(directory), 0o700)
+        os.chmod(root, 0o700)
         os.chmod(directory, 0o700)
     except OSError:
         pass

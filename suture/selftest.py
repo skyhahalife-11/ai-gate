@@ -14,7 +14,6 @@ Suture 自己发不出那次真实请求（没有地址可发），静态检查�
 from __future__ import annotations
 
 import os
-import shlex
 import shutil
 import subprocess
 from dataclasses import dataclass
@@ -124,7 +123,10 @@ def run(argv: Optional[List[str]], env: Optional[Dict[str, str]] = None,
 
     override = env.get(ENV_COMMAND_OVERRIDE)
     if override:
-        argv = shlex.split(override)
+        # 走 installer.split_command，不用 POSIX 的 shlex.split：后者把反斜杠当
+        # 转义符，Windows 路径会被吃成一个不存在的文件名。两处覆盖开关口径统一。
+        from .installer import split_command
+        argv = split_command(override)
     if not argv:
         return SelfTestResult(attempted=False, ok=False,
                               detail="该客户端尚未确认可用的非交互调用方式，跳过实测。")

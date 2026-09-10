@@ -40,13 +40,31 @@ def runtime_guide() -> str:
             "如果已经装过但这里仍提示没有，多半是终端没重开、PATH 还没刷新。")
 
 
+def split_command(raw: str) -> List[str]:
+    """把一条覆盖命令拆成 argv。
+
+    不能用 POSIX 的 shlex.split：它把反斜杠当转义符，Windows 路径会被吃掉——
+    `C:\\Program Files\\x\\py.exe` 会变成 `C:Program Filesxpy.exe`，然后工具报
+    「找不到可执行的文件」，而用户明明写的是一个存在的路径。Windows 上改用
+    非 POSIX 模式拆（保留反斜杠），再手动剥掉成对的引号（POSIX 模式会自动剥，
+    非 POSIX 模式不会）。带空格的路径仍然需要自己加引号，这一点跟命令行一致。"""
+    if os.name != "nt":
+        return shlex.split(raw)
+    out: List[str] = []
+    for tok in shlex.split(raw, posix=False):
+        if len(tok) >= 2 and tok[0] == tok[-1] and tok[0] in ("'", '"'):
+            tok = tok[1:-1]
+        out.append(tok)
+    return out
+
+
 def resolve_command(adapter, env: Optional[Dict[str, str]] = None) -> Optional[List[str]]:
     """返回要执行的安装命令。测试/特殊部署用 SUTURE_INSTALL_CMD_<HARNESS_ID>
     覆盖（比如换成一条必然成功的假命令），否则用适配器写死的官方命令。"""
     env = dict(env if env is not None else os.environ)
     flag = env.get(INSTALL_OVERRIDE.format(harness_id=adapter.harness_id.upper()))
     if flag is not None and str(flag).strip():
-        return shlex.split(str(flag))
+        return split_command(str(flag))
     return adapter.install_command(env=env)
 
 

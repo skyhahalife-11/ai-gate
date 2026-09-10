@@ -1,6 +1,6 @@
 # 验收记录
 
-`python3 -m unittest discover -s tests -t .` —— 121 条，全部通过（1 条在 root 下跳过，
+`python3 -m unittest discover -s tests -t .` —— 137 条，全部通过（1 条在 root 下跳过，
 已另行以普通用户身份验证）。测试不依赖真实网关，用 `mock_gateway.py` 起一个假网关，
 让它表现成各种情况来触发每条判断分支。
 
@@ -317,6 +317,39 @@ Windows 上造不出真实写入失败，属平台限制）。完整清单见 `R
 **还没做**：Windows 的 chmod 空操作仍是文档口径问题（REVIEW 第 2 条）；3 条低危
 体验项（WebView 回退死胡同、备份同秒同名、codex 判定口径）已在 REVIEW 第三轮
 「本轮未修」里记录。
+
+## 2026-09-10 第四轮：修回归 + 写入链路
+
+三路只读审查（本轮改动本身 / 新人流程 / 写入安全与并发），每条结论都由我独立复现
+后才采纳。新增回归验收见 `tests/test_review_round4.py`（16 条）。修复后的全量：
+**137 条全过，跳过 1**。完整清单见 `REVIEW-2026-09-10.md` 第四轮。
+
+**一、第三轮的「按类修复」自己写出了回归**
+
+| 类别 | 问题 | 修法 |
+|---|---|---|
+| 死按钮 | `_redact_result` 就地 `pop("fix_value")`，而出网 payload 与服务端 `last_report` 持有的是**同一批 dict**（`_record_client` 按引用接管 `issues`）→ 脱敏把服务端那份也抹了。点完一次修复，同一客户端剩下的按钮全拿不到值 | `redact_client` 改为**返回副本**；`_record_client` 接管时把 `issues` 拷一份自己持有 |
+| 误判 | `_is_env_like_layer` 用 `endswith(".env")` 把 deepseek 的 `.env` 层当成"环境变量"→ 判成改不到、按钮消失，文案还把人指向「系统设置 → 环境变量」。但 `store_key` 写的 `.credentials.yaml` **优先级高于 `.env`**，写入一定生效 | 去掉 `.env` 分支，docstring 写清依据（实测：写入后新 Key 确实赢了 `.env`） |
+| 误判 | `unparseable_write_target` 按客户端整体判，一份坏的 `.credentials.yaml` 把 `base_url`/`model` 的按钮也封了——而这两个字段只写 `settings.yaml`，`apply` 实测能成功 | 判定改按**字段**：`unparseable_write_target(cfg, fields=...)`，deepseek 只在要写 auth 类字段时才把凭据文件算进来 |
+
+**二、写入链路不是原子的**
+
+| 类别 | 问题 | 修法 |
+|---|---|---|
+| 清空配置 | deepseek 的 `apply` 先 `open(path,"w")` 截断、后求值 `yaml.dump(...)`；写出器拒绝某个值（如带换行的 Key）抛 `MiniYamlError`，而它既不是 `RefuseWrite` 也不是 `OSError`——引擎两个 except 都接不住。实测 `settings.yaml 153 字节 → 0 字节`，异常逃逸、无回滚 | 新增 `base.write_bytes_atomic`（先序列化+编码，再写临时文件、`os.replace` 原子替换）；三个适配器全部改走它；序列化失败转 `RefuseWrite` 走已有的「拒绝写入+说明原因」路径。claude 的孤立代理字符（`UnicodeEncodeError`）同样处理 |
+| 半成品配置 | `configure_client` 先落盘配置、再存 Key；存失败只塞进 `steps`（前端不渲染）、不回滚，磁盘上留下「请替换为网关后台生成的 Key」；备份还是在生成**之后**做的 | 改成**先备份、再生成**；存 Key 失败按备份回滚并说明「已放弃这次配置」 |
+| 静默替换 | 一键配置把不认识的模型换成探活模型，还报「配置完成，已连接」 | 模型必须是用户真选了、且网关确实有的；为空或不在清单里就什么都不写、明确告知 |
+| 断连 | `/api/state` 是唯一没有兜底的路由（`/api/check` 的注释还写着「所有其它路由都有同样的兜底」）。畸形嵌套 JSON → `RecursionError` 逃出 → 连接被直接关掉，前端渲染空白页 | 加与其它路由一致的 try/except，返回可读中文 500 |
+| 并发安装 | `/api/install_run` 在锁外且无去重；UI 只 disable 被点的那一个按钮 | 新增独立 `install_lock`（非阻塞）：正在装时再点返回 409 + 中文说明。实测两个请求由 `[200,200]` 变为 `[200,409]` |
+| 提醒丢失 | `note`/`steps` 从不渲染，丢的是「要重启客户端」「重开终端后生效」这类关键提醒 | 前端渲染 `r.note`（action 与 configure 两条路径；`.result` 是 `white-space: pre-line`，换行正常） |
+| 路径被吃 | `shlex.split` 是 POSIX 语义，把 Windows 路径的反斜杠当转义符（`C:\Program Files\x\py.exe` 会变成 `C:Program Filesxpy.exe`） | 新增 `installer.split_command`（Windows 用非 POSIX 模式 + 手动剥引号），`selftest` 的覆盖开关共用 |
+| 备份被覆盖 | 备份目录只有秒级时间戳，同秒第二次备份**覆盖**第一次——备份里留下的是改过之后的内容，原始那版找不回来（第三轮把这条写轻了，已更正） | 同秒自动改用 `<时间戳>-2`、`-3`… |
+
+**本轮没动的**：带空格且未加引号的覆盖命令会被拆错（与命令行行为一致）、
+`Engine._backups` 从不被读（成功修复没有撤销入口，属产品决策）、备份目录只增不减、
+`/api/recheck` 与 `ClientState.generated_path` 是死代码。另记：`test_server` 在全量
+运行中出现过 1 次偶发失败（两个用例连接被重置），HEAD 上 6 次未复现，证据不足以定性；
+修完后的两轮全量稳定通过。
 
 ## 还没验证的
 

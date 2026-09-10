@@ -418,7 +418,9 @@ async function actFix(card, clientId, issueId, act, getValue) {
   try {
     const r = await api("/api/action", { client_id: clientId, issue_id: issueId, value });
     const cls = r.result === "fixed" ? "ok" : (r.result === "changed" ? "warn" : "bad");
-    const msg = el("div", "result " + cls, r.message);
+    // note 里是「改的是配置文件，正在运行的客户端要重启才会读到新值」这类提醒。
+    // 不显示出来，用户会以为修好了却没生效，反复点。
+    const msg = el("div", "result " + cls, r.message + (r.note ? "\n" + r.note : ""));
     if (r.client) {
       placeClient(r.client, msg);
       recomputeOverview();
@@ -470,7 +472,8 @@ $("results").addEventListener("click", async (ev) => {
     try {
       const r = await api("/api/configure", { client_id: clientId, model, api_key: apiKey });
       const cls = r.client && r.client.state === "connected" ? "ok" : "warn";
-      const msg = r.message + (r.path ? "\n配置写入：" + r.path : "");
+      const msg = r.message + (r.path ? "\n配置写入：" + r.path : "")
+                  + (r.note ? "\n" + r.note : "");
       placeClient(r.client, el("div", "result " + cls, msg));
       recomputeOverview();
     } catch (e) {

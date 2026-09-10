@@ -7,6 +7,7 @@ from __future__ import annotations
 
 import os
 import shutil
+import tempfile
 from dataclasses import dataclass, field
 from typing import Any, Dict, List, Optional, Tuple
 
@@ -179,11 +180,16 @@ class HarnessAdapter:
         """告诉用户这个客户端的 Key 该怎么存（写到哪 / 设成哪个环境变量）。"""
         return ""
 
-    def unparseable_write_target(self, cfg: HarnessConfig) -> Optional[str]:
+    def unparseable_write_target(self, cfg: HarnessConfig,
+                                 fields: Optional[set] = None) -> Optional[str]:
         """修复要写进去的那个文件读不懂时，返回它的路径；能正常写返回 None。
 
         用途有两个：判定层据此不给出「点了也写不进去」的自动修复按钮，执行层
-        据此拒绝写入（见 RefuseWrite）。三个适配器里只有会整文件重写的需要实现。"""
+        据此拒绝写入（见 RefuseWrite）。三个适配器里只有会整文件重写的需要实现。
+
+        fields 是这次要写的逻辑字段集合（None = 不限定）。必须带上它：同一个
+        harness 的不同字段可能落在不同文件上，按客户端整体判会把「某一个文件坏了」
+        错误地扩散成「所有字段都不能改」。"""
         return None
 
     # ---- 读取 ----
@@ -260,3 +266,29 @@ def mask_secret(value: Optional[str]) -> str:
     if len(value) <= 8:
         return "*" * len(value)
     return f"{value[:4]}{'*' * max(4, len(value) - 8)}{value[-4:]}"
+
+
+def write_bytes_atomic(path: str, data: bytes) -> None:
+    """先写同目录下的临时文件、再原子替换目标。
+
+    为什么不直接 `open(path, "w")`：那是**先截断再写**。只要序列化/编码在写入
+    之后才失败（写出器拒绝某个值、内容编码不了 UTF-8、磁盘满），用户的原文件
+    就已经被清空了——配置没了，而且报错里还只说"写入失败"。改成「内容先全部
+    准备好、落到临时文件、最后一步替换」，失败时原文件逐字节不动。
+
+    临时文件放在同目录是为了 os.replace 能在同一个文件系统内原子完成；
+    用 mkstemp 生成唯一名字，避免和别的写者抢同一个临时文件。"""
+    directory = os.path.dirname(os.path.abspath(path))
+    os.makedirs(directory, exist_ok=True)
+    fd, tmp = tempfile.mkstemp(dir=directory, prefix=".suture-write-")
+    try:
+        with os.fdopen(fd, "wb") as f:
+            f.write(data)
+        os.replace(tmp, path)
+    except BaseException:
+        # 走到这儿说明没能替换成功，原文件还在。清掉临时文件再往外抛。
+        try:
+            os.unlink(tmp)
+        except OSError:
+            pass
+        raise

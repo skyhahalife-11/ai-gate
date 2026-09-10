@@ -413,6 +413,17 @@ class Engine:
             return {"result": RESULT_MANUAL,
                     "message": f"配置写入失败：{exc}。{rb}原始备份仍在 {manifest.directory}。",
                     "steps": steps, "backup_dir": manifest.directory}
+        except Exception as exc:      # noqa: BLE001
+            # 兜底：写盘链路里任何没预料到的异常，都当作"这次写入不可信"处理——
+            # 先按备份恢复，再如实报出去。绝不让它逃到路由层变成一个只有英文的
+            # 500：那样用户既不知道配置到底改没改，也拿不到备份路径。
+            failed = fixer.rollback(manifest)
+            rb = "已按备份恢复原配置。" if not failed else \
+                 "尝试恢复原配置，但以下文件未能还原：{}。".format("、".join(failed))
+            return {"result": RESULT_MANUAL,
+                    "message": f"配置写入时出错（{type(exc).__name__}）：{exc}。{rb}"
+                               f"原始备份仍在 {manifest.directory}。",
+                    "steps": steps, "backup_dir": manifest.directory}
         steps.append({"detail": "；".join(applied) if applied else "没有需要写入的改动"})
         return self._after_write(client_id, steps, manifest, None,
                                  "已修复，已连接 AI Gate。",
@@ -461,30 +472,60 @@ class Engine:
                              "请先手动删除现有的配置文件，再回来点「配置」。"),
                     "steps": [], "client": asdict(client)}
         known = model_ids(self.profile)
-        pm = self._probe_model()
-        pick = model if (model and model in known) else (pm if pm in known else (known[0] if known else ""))
-        path = adapter.generate_minimal_config(
-            expected_base_url(self.profile, client_id), pick,
-            env=self.env, home=self.home, project_dir=self.project_dir)
-        steps = [{"detail": f"已生成最小配置：{path}"}]
+        # 模型必须是用户真选了的、而且网关确实有这个型号。以前这里会在用户没选
+        # （前端下拉为空）或选了个不存在的型号时，悄悄换成探活模型写进去——用户
+        # 要 A、配置里是 B，提示还说「配置完成，已连接」。宁可什么都不写、让用户
+        # 重选，也不替他决定一个他从没选过的模型（跟生成配置时留占位符同一口径）。
+        pick = str(model or "").strip()
+        if not pick:
+            client = self.assess_client(client_id)
+            return {"path": None, "message": "还没有选择模型，未写入任何配置。",
+                    "note": "请在上面选一个要用的模型（清单来自网关）。若列表是空的，"
+                            "先回「检查」页重新连一次网关。",
+                    "steps": [], "client": asdict(client)}
+        if pick not in known:
+            client = self.assess_client(client_id)
+            return {"path": None,
+                    "message": f"「{pick}」不在网关支持的模型清单里，未写入任何配置。",
+                    "note": "请从上面的列表里选一个网关确实支持的型号。",
+                    "steps": [], "client": asdict(client)}
+
+        # 先备份、再生成。顺序反了就没有可回滚的起点：generate_minimal_config 是
+        # 整文件覆盖，备份如果发生在生成之后，备份里存的就是刚生成的占位文件。
+        manifest = fixer.backup_files(adapter.writable_paths(probe_cfg), home=self.home)
+        self._backups[client_id] = manifest
+        steps = [{"detail": f"已备份原配置到 {manifest.directory}"}]
+        try:
+            path = adapter.generate_minimal_config(
+                expected_base_url(self.profile, client_id), pick,
+                env=self.env, home=self.home, project_dir=self.project_dir)
+        except (RefuseWrite, OSError) as exc:
+            return {"path": None, "message": f"没能生成配置：{exc}",
+                    "note": None, "steps": steps,
+                    "client": asdict(self.assess_client(client_id))}
+        steps.append({"detail": f"已生成最小配置：{path}"})
         note = None
 
         cfg = self.read_harness(client_id)
         if api_key and str(api_key).strip():
             key = str(api_key).strip()
-            manifest = fixer.backup_files(adapter.writable_paths(cfg), home=self.home)
-            self._backups[client_id] = manifest
-            steps.append({"detail": f"已备份原配置到 {manifest.directory}"})
             try:
                 store_steps, _changed, note = adapter.store_key(
                     cfg, key, env=self.env, home=self.home, project_dir=self.project_dir)
-            except RefuseWrite as exc:
-                steps.append({"detail": f"Key 未保存：{exc}"})
-            except OSError as exc:
-                steps.append({"detail": f"Key 未保存：{exc}"})
-            else:
-                steps.extend({"detail": s} for s in store_steps)
-                self.env["AI_GATE_API_KEY"] = key
+            except (RefuseWrite, OSError) as exc:
+                # Key 没写进去 = 这份刚生成的配置是「有地址没 Key」的半成品。
+                # 留着它只会让用户回到检查页看到一个连不上的客户端，还得自己
+                # 去删——按备份回滚，让磁盘回到这次操作之前的样子，并如实说明。
+                failed = fixer.rollback(manifest)
+                rb = "已恢复到配置之前的样子。" if not failed else \
+                     "尝试恢复，但以下文件未能还原：{}。".format("、".join(failed))
+                return {"path": None,
+                        "message": f"Key 没能保存（{exc}），已放弃这次配置。{rb}",
+                        "note": "请确认这个客户端能正常读写它自己的配置文件，再重试。",
+                        "steps": steps,
+                        "client": asdict(self.assess_client(client_id))}
+            steps.extend({"detail": s} for s in store_steps)
+            self.env["AI_GATE_API_KEY"] = key
 
         client = self.assess_client(client_id)
         if client.state == STATE_CONNECTED:
@@ -498,28 +539,38 @@ class Engine:
 
 
 def redact_client(payload: Dict[str, Any]) -> Dict[str, Any]:
-    """把一份序列化后的 ClientState 里的敏感值抹掉。
+    """把一份序列化后的 ClientState 脱敏，返回**副本**（不改传入的那份）。
 
     `fix_value` 可能是原始 Key（补 Token 头、去掉首尾空白这两条修复的载荷都是它）。
     界面完全用不到这个字段——点「修复」时前端只发 {client_id, issue_id}，真正的值
     由服务端从自己那份 last_report 里取。所以任何一份要发给浏览器的客户端数据都先
     过这里，Key 在界面/接口返回里永远只以掩码（前 4 + 后 4）的形式出现。
 
-    注意：这是"按字段名"脱敏，不是只给某一条路由用。会返回客户端数据的路由有
-    四条（/api/check、/api/action、/api/configure、/api/recheck），只堵其中一条
-    等于没堵——上一轮就是只在 report_to_dict 里做，另外三条照样漏。
+    注意两件事：
+    1. 这是"按字段名"脱敏，不是只给某一条路由用。会返回客户端数据的路由有
+       四条（/api/check、/api/action、/api/configure、/api/recheck），只堵其中一条
+       等于没堵——上一轮就是只在 report_to_dict 里做，另外三条照样漏。
+    2. 必须返回副本、**不能就地 pop**：出网的这份 payload 和服务端 last_report 里
+       持有的曾经是同一批 dict，就地抹掉会把服务端自己那份也一起抹了——用户点完
+       一次修复，同一客户端剩下的「一键修复」按钮就全拿不到值、变成死按钮。
     """
     if not isinstance(payload, dict):
         return payload
-    for issue in payload.get("issues") or []:
-        if isinstance(issue, dict):
-            issue.pop("fix_value", None)
-    return payload
+    issues = payload.get("issues")
+    if not isinstance(issues, list):
+        return dict(payload)
+    clean = dict(payload)
+    clean["issues"] = [
+        {k: v for k, v in it.items() if k != "fix_value"} if isinstance(it, dict) else it
+        for it in issues
+    ]
+    return clean
 
 
 def report_to_dict(report: Report) -> Dict[str, Any]:
     """报告要能直接序列化给界面（出网前统一脱敏，见 redact_client）。"""
     payload = asdict(report)
-    for client in payload.get("clients") or []:
-        redact_client(client)
+    clients = payload.get("clients")
+    if isinstance(clients, list):
+        payload["clients"] = [redact_client(c) for c in clients]
     return payload

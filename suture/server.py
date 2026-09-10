@@ -25,6 +25,10 @@ class _State:
         self.token = secrets.token_urlsafe(24)
         self.last_report: Optional[E.Report] = None
         self.lock = threading.Lock()
+        # 安装单独一把锁：它可能跑好几分钟，占着主锁会把 state/check 全卡住。
+        # 用非阻塞获取，第二个安装请求直接被告知"已经在装了"而不是并发跑起来
+        # （两个 npm install -g 同时写同一个全局前缀，谁也不知道会装成什么样）。
+        self.install_lock = threading.Lock()
 
 
 def _json_bytes(payload: Dict[str, Any]) -> bytes:
@@ -91,6 +95,10 @@ class Handler(BaseHTTPRequestHandler):
             self.state.last_report = report
         valid = {f.name for f in fields(E.ClientState)}
         client = E.ClientState(**{k: v for k, v in client_dict.items() if k in valid})
+        # issues 里带着修复载荷（可能是原始 Key），而这份 dict 同时也会被交给
+        # 浏览器（出网前会脱敏）。这里把 issues 拷一份自己持有，服务端这份就和
+        # 出网那份彻底分家——以后无论谁动其中一份，都不会误伤另一份。
+        client.issues = [dict(i) if isinstance(i, dict) else i for i in (client.issues or [])]
         for i, c in enumerate(report.clients):
             if c.client_id == client.client_id:
                 report.clients[i] = client
@@ -114,6 +122,15 @@ class Handler(BaseHTTPRequestHandler):
                 return
             eng = self.state.engine
             models = eng.profile.get("models", [])
+            # 这条路由读三份真实配置（每个 harness 一次 read），哪一份的文件形态
+            # 出乎意料都可能抛。没有兜底的话连接会被直接关掉，前端的 api() 抛错、
+            # 又被 reloadState 的空 catch 吞掉 —— 用户看到的是安装页整片空白、
+            # 页头永远「加载中」，一句提示都没有。跟其它路由一个口径：如实报错。
+            try:
+                clients = [_client_meta(eng, a) for a in ALL_ADAPTERS]
+            except Exception as exc:      # noqa: BLE001
+                self._send_json({"error": f"读取本机配置失败：{exc}"}, 500)
+                return
             self._send_json({
                 "profile_source": eng.profile_source,
                 "gateway_name": eng.profile.get("gateway_name", "AI Gate"),
@@ -122,7 +139,7 @@ class Handler(BaseHTTPRequestHandler):
                            for m in models],
                 "gateway_url": eng.profile.get("base_url", {}).get("canonical_root", ""),
                 "runtime": installer.check_runtime(eng.env),
-                "clients": [_client_meta(eng, a) for a in ALL_ADAPTERS],
+                "clients": clients,
             })
             return
         self._send(404, b"not found", "text/plain; charset=utf-8")
@@ -151,7 +168,18 @@ class Handler(BaseHTTPRequestHandler):
             if adapter is None:
                 self._send_json({"error": "没有这个客户端。"}, 400)
                 return
-            result = installer.run_install(adapter, env=self.state.engine.env)
+            # 同一时刻只允许一个安装。用非阻塞获取：正在装的时候再点（另一个
+            # 客户端、或刷新后的同一个）直接如实告知，不再并发跑第二个安装——
+            # 两个 npm install -g 同时写同一个全局前缀，结果不可预期。
+            if not self.state.install_lock.acquire(blocking=False):
+                self._send_json({"ok": False, "ran": False, "timed_out": False, "output": "",
+                                 "message": "已经有一个安装在进行中，请等它结束后再试。"},
+                                409)
+                return
+            try:
+                result = installer.run_install(adapter, env=self.state.engine.env)
+            finally:
+                self.state.install_lock.release()
             self._send_json(result)
             return
 
@@ -230,9 +258,12 @@ class Handler(BaseHTTPRequestHandler):
 
 def _redact_result(result: Dict[str, Any]) -> Dict[str, Any]:
     """apply_action / configure_client 的返回值里带着一份客户端数据，
-    出网前统一脱敏（服务端自己的 last_report 仍保留原始值，点「修复」时要用）。"""
+    出网前统一脱敏（服务端自己的 last_report 仍保留原始值，点「修复」时要用）。
+
+    脱敏返回的是副本，所以这里必须把结果**替换**掉，不能指望就地改生效——
+    就地改会连 last_report 里那份一起抹掉（见 engine.redact_client 的说明）。"""
     if isinstance(result, dict) and isinstance(result.get("client"), dict):
-        E.redact_client(result["client"])
+        result["client"] = E.redact_client(result["client"])
     return result
 
 

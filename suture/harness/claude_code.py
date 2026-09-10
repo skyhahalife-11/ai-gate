@@ -26,7 +26,7 @@ from typing import Any, Dict, List, Optional, Tuple
 from .base import (
     ExtraAuthHeader, FIELD_AUTH, FIELD_BASE_URL, FIELD_EXTRA_HEADER, FIELD_MODEL,
     FileState, HarnessAdapter, HarnessConfig, LayerValue, RefuseWrite, build_resolved,
-    resolve_home, resolve_project_dir,
+    resolve_home, resolve_project_dir, write_bytes_atomic,
 )
 
 ENV_BASE_URL = "ANTHROPIC_BASE_URL"
@@ -244,7 +244,10 @@ class ClaudeCodeAdapter(HarnessAdapter):
             return project
         return next(f for f in cfg.files if f.layer == "全局配置")
 
-    def unparseable_write_target(self, cfg: HarnessConfig) -> Optional[str]:
+    def unparseable_write_target(self, cfg: HarnessConfig,
+                                 fields: Optional[set] = None) -> Optional[str]:
+        # Claude Code 的字段（地址/鉴权/模型/自定义头）全都落进同一个 settings.json，
+        # 所以这里不区分字段——那个文件坏了，写哪个字段都不行。
         target = self._target_file(cfg)
         if target.exists and not target.parse_ok:
             return target.path
@@ -283,9 +286,18 @@ class ClaudeCodeAdapter(HarnessAdapter):
 
         data["env"] = block
         os.makedirs(os.path.dirname(target.path), exist_ok=True)
-        with open(target.path, "w", encoding="utf-8") as f:
-            json.dump(data, f, ensure_ascii=False, indent=2)
-            f.write("\n")
+        try:
+            # 先把整份内容序列化好再落盘：直接 open(...) 是先截断后写，只要
+            # 序列化这一步失败（比如配置里存着半个 emoji 形成的孤立代理字符，
+            # ensure_ascii=False 下编码不成 UTF-8），用户的原文件就只剩半截。
+            # 编码也在这里做完，失败转成 RefuseWrite，让引擎按「拒绝写入 +
+            # 说明原因」处理，而不是留个写坏的 settings.json。
+            body = (json.dumps(data, ensure_ascii=False, indent=2) + "\n").encode("utf-8")
+        except (UnicodeEncodeError, ValueError, TypeError) as exc:
+            raise RefuseWrite(
+                f"无法写入 {target.path}：这份配置里有无法转成 UTF-8 的内容（{exc}）。"
+                "为避免把文件写坏，这里不自动修改。") from exc
+        write_bytes_atomic(target.path, body)
         try:
             # 这份文件现在可能带着 Key 明文（env 块 / ANTHROPIC_CUSTOM_HEADERS），
             # 收紧权限，跟 DeepSeek 的凭据文件口径一致。

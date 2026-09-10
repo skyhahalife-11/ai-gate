@@ -486,15 +486,17 @@ def _is_env_like_layer(name: str) -> bool:
     """这一层的值来自「进程/系统环境变量」而不是某个配置文件。
 
     三个适配器给这种层的命名并不统一（claude 是「环境变量」，codex 是
-    「环境变量 AI_GATE_API_KEY」，deepseek 是「启动时的环境变量」以及两种 .env），
-    所以按名字精确匹配会漏。这里统一按"是不是环境变量类来源"判断。"""
+    「环境变量 AI_GATE_API_KEY」，deepseek 是「启动时的环境变量」），
+    所以按名字精确匹配会漏。这里统一按"是不是环境变量类来源"判断。
+
+    注意**不要**把 deepseek 的 `.env` 也算进来：那是文件、不是进程环境变量，
+    而且 Suture 写 `.credentials.yaml` 的优先级**高于** `.env`（见 deepseek 的
+    解析顺序「启动环境 > 凭据文件 > 项目 .env > harness home 下的 .env」），
+    写进去一定生效。把它归成"改不到"会白丢一个本来能用的按钮，还会把人指向
+    「系统设置 → 环境变量」——那个值根本不在那里。"""
     if not name:
         return False
-    if name.startswith("环境变量") or name in ("启动时的环境变量",):
-        return True
-    # deepseek 的 dotenv 来源：「项目目录下的 .env」「harness home 下的 .env」。
-    # Suture 从不写 .env 文件，所以这类同样改不到。
-    return name.endswith(".env")
+    return name.startswith("环境变量") or name in ("启动时的环境变量",)
 
 
 def _readonly_layers(cfg: HarnessConfig, key: str) -> List[str]:
@@ -521,10 +523,15 @@ def _readonly_source(cfg: HarnessConfig, key: str) -> bool:
     return bool(_readonly_layers(cfg, key))
 
 
-def _write_target_unreadable(cfg: HarnessConfig) -> bool:
-    """修复要写进去的那个文件读不懂 → 写进去会整份覆盖，不给自动修复按钮。"""
+def _write_target_unreadable(cfg: HarnessConfig, keys: List[str]) -> bool:
+    """修复要写进去的那个文件读不懂 → 写进去会整份覆盖，不给自动修复按钮。
+
+    必须带上这次要写哪些字段：有些 harness 的不同字段落在**不同**文件上
+    （deepseek 的 base_url/model 只写 settings.yaml，凭据文件只跟 auth 有关），
+    按客户端整体判会把「一份坏的凭据文件」扩散成「所有按钮都点不了」。"""
     try:
-        return get_adapter(cfg.harness_id).unparseable_write_target(cfg) is not None
+        adapter = get_adapter(cfg.harness_id)
+        return adapter.unparseable_write_target(cfg, fields=set(keys)) is not None
     except Exception:      # noqa: BLE001 —— 判定层不该因为适配器的小毛病整轮失败
         return False
 
@@ -535,14 +542,14 @@ def _cannot_write(cfg: HarnessConfig, keys: List[str]) -> bool:
     两种不生效的情况：生效层是 Suture 改不到的（环境变量/托管配置），或者要写的
     文件本身读不懂（写进去会整份覆盖，适配器会 RefuseWrite）。命中任一条就不该给
     按钮——点了不是原地循环就是必然报错。"""
-    if _write_target_unreadable(cfg):
+    if _write_target_unreadable(cfg, keys):
         return True
     return any(_readonly_source(cfg, k) for k in keys)
 
 
 def _why_cannot_write(cfg: HarnessConfig, key: str) -> str:
     """给「这类原因在当前情况下改不了」配一句可操作的说明。"""
-    if _write_target_unreadable(cfg):
+    if _write_target_unreadable(cfg, [key]):
         return ("要修改的配置文件现在读不懂（多半是语法错或编码不对），Suture 不会在"
                 "这种情况下写入——那会把同一份文件里其它设置一起覆盖掉。"
                 "请先按上面的说明把文件修好，再重新检查。")
@@ -593,7 +600,7 @@ def finding_to_issue(f: Finding, cfg: HarnessConfig) -> Dict[str, Any]:
         # 不生效——点了没反应。同理，目标文件读不懂时写进去会整份覆盖。两种都
         # 不给按钮（前者在 blocked_reasons 里统一换成外部说明，后者由格式错误那条
         # 说明原因），避免用户点了白点、或者点出一次数据丢失。
-        if _readonly_source(cfg, FIELD_BASE_URL) or _write_target_unreadable(cfg):
+        if _readonly_source(cfg, FIELD_BASE_URL) or _write_target_unreadable(cfg, [FIELD_BASE_URL]):
             cur["title"] = "网关地址不对（改配置文件在当前情况下不生效或不被允许）"
             cur["repair_kind"] = "external"
             cur["fix_field"] = f.fix_field
@@ -650,7 +657,7 @@ def finding_to_issue(f: Finding, cfg: HarnessConfig) -> Dict[str, Any]:
         cur["title"] = "鉴权信息在多个位置重复设置"
         cur["repair_kind"] = "none"
     elif key == "model" or key.startswith("model:"):
-        if _readonly_source(cfg, FIELD_MODEL) or _write_target_unreadable(cfg):
+        if _readonly_source(cfg, FIELD_MODEL) or _write_target_unreadable(cfg, [FIELD_MODEL]):
             cur["title"] = "模型名称不对（改配置文件在当前情况下不生效或不被允许）"
             cur["repair_kind"] = "external"
             cur["fix_field"] = f.fix_field
@@ -874,7 +881,7 @@ def _auth_header_issue(cfg: HarnessConfig,
     # base_url / model 那两条是同一个陷阱，所以同样不给按钮，改成外部说明。
     if auto and _is_env_like_layer(cfg.custom_headers_source_layer):
         auto = False
-    if auto and _write_target_unreadable(cfg):
+    if auto and _write_target_unreadable(cfg, [FIELD_EXTRA_HEADER]):
         auto = False
     if auto:
         tail = ""
