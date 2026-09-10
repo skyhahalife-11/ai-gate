@@ -1,0 +1,347 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Suture · 能力清单</title>
+<style>
+  :root {
+    --bg: #FAF9F5;
+    --surface: #FFFFFF;
+    --surface-alt: #F0EEE6;
+    --ink: #141413;
+    --ink-muted: #6B6B68;
+    --border: #E8E6DE;
+    --accent: #D97757;
+    --accent-soft: #F7E9E2;
+    --success: #2C7A55;
+    --success-soft: #E3F1E9;
+    --warning: #9A6B1F;
+    --warning-soft: #F7EDD9;
+    --danger: #B3261E;
+    --danger-soft: #FBE7E5;
+    --font-ui: -apple-system, BlinkMacSystemFont, "Segoe UI", "PingFang SC",
+               "Microsoft YaHei", sans-serif;
+    --font-mono: ui-monospace, "SF Mono", Menlo, Consolas, monospace;
+    --radius-card: 12px;
+    --radius-ctl: 8px;
+  }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0; background: var(--bg); color: var(--ink);
+    font-family: var(--font-ui); font-size: 15px; line-height: 1.65;
+    -webkit-font-smoothing: antialiased;
+  }
+  .wrap { max-width: 860px; margin: 0 auto; padding: 44px 26px 90px; }
+
+  header { border-bottom: 2px solid var(--ink); padding-bottom: 18px; margin-bottom: 30px; }
+  h1 { font-size: 1.9rem; margin: 0 0 8px; letter-spacing: -0.02em; }
+  .lede { font-size: 1.02rem; color: var(--ink-muted); margin: 0; max-width: 62ch; }
+  .lede strong { color: var(--ink); }
+
+  h2 {
+    font-size: 1.22rem; margin: 44px 0 6px; letter-spacing: -0.01em;
+    padding-top: 6px;
+  }
+  h2 .num {
+    display: inline-block; min-width: 1.9em; color: var(--accent);
+    font-family: var(--font-mono); font-size: 1rem;
+  }
+  .h2sub { color: var(--ink-muted); font-size: 0.92rem; margin: 0 0 16px; }
+  .h2sub code {
+    font-family: var(--font-mono); background: var(--surface-alt);
+    padding: 1px 6px; border-radius: 4px; font-size: 0.88em;
+  }
+
+  /* ---- 四态 ---- */
+  .states { display: grid; grid-template-columns: repeat(4, 1fr); gap: 10px; margin: 18px 0 6px; }
+  .state {
+    background: var(--surface); border: 1px solid var(--border);
+    border-radius: var(--radius-card); padding: 14px 15px;
+  }
+  .state .dot {
+    display: inline-block; width: 9px; height: 9px; border-radius: 50%;
+    margin-right: 7px; vertical-align: 1px;
+  }
+  .state .n { font-weight: 600; display: block; margin-bottom: 5px; }
+  .state .d { font-size: 0.85rem; color: var(--ink-muted); line-height: 1.5; }
+  .dot.ok { background: var(--success); }
+  .dot.warn { background: var(--warning); }
+  .dot.bad { background: var(--danger); }
+
+  /* ---- 表 ---- */
+  table { width: 100%; border-collapse: collapse; margin: 4px 0 8px; }
+  th, td { text-align: left; vertical-align: top; padding: 10px 12px; border-bottom: 1px solid var(--border); }
+  th {
+    font-size: 0.8rem; font-weight: 600; color: var(--ink-muted);
+    text-transform: none; letter-spacing: 0.02em; background: var(--surface-alt);
+    border-bottom: 1px solid var(--border);
+  }
+  th:first-child, td:first-child { border-top-left-radius: 6px; }
+  tbody tr:last-child td { border-bottom: 1px solid var(--border); }
+  td.i { width: 30px; color: var(--ink-muted); font-family: var(--font-mono); font-size: 0.82rem; }
+  td.what { width: 42%; }
+  code, .mono { font-family: var(--font-mono); font-size: 0.87em; }
+  code { background: var(--surface-alt); padding: 1px 5px; border-radius: 4px; }
+
+  .panel {
+    background: var(--surface); border: 1px solid var(--border);
+    border-radius: var(--radius-card); padding: 4px 4px 0; overflow: hidden;
+    margin-bottom: 6px;
+  }
+  .panel table { margin: 0; }
+  .panel th { border-radius: 0; }
+
+  .callout {
+    border-left: 3px solid var(--accent); background: var(--accent-soft);
+    padding: 12px 16px; border-radius: 0 var(--radius-ctl) var(--radius-ctl) 0;
+    margin: 16px 0; font-size: 0.93rem;
+  }
+  .callout.good { border-color: var(--success); background: var(--success-soft); }
+  .callout.warn { border-color: var(--warning); background: var(--warning-soft); }
+  .callout p { margin: 0; }
+  .callout p + p { margin-top: 6px; }
+
+  ol.rules { counter-reset: r; list-style: none; padding: 0; margin: 8px 0 0; }
+  ol.rules li {
+    counter-increment: r; position: relative; padding: 9px 0 9px 40px;
+    border-bottom: 1px solid var(--border);
+  }
+  ol.rules li:last-child { border-bottom: none; }
+  ol.rules li::before {
+    content: counter(r); position: absolute; left: 0; top: 9px;
+    width: 24px; height: 24px; border-radius: 50%;
+    background: var(--accent-soft); color: var(--accent);
+    font-size: 0.82rem; font-weight: 700; display: grid; place-items: center;
+    font-family: var(--font-mono);
+  }
+  ol.rules b { font-weight: 600; }
+
+  ul.plain { padding-left: 20px; margin: 8px 0; }
+  ul.plain li { margin-bottom: 7px; }
+
+  .status { display: grid; grid-template-columns: 150px 1fr; gap: 0; margin-top: 8px; }
+  .status dt {
+    font-size: 0.88rem; color: var(--ink-muted); padding: 10px 0;
+    border-bottom: 1px solid var(--border);
+  }
+  .status dd {
+    margin: 0; padding: 10px 0; border-bottom: 1px solid var(--border);
+    font-size: 0.93rem;
+  }
+  .status dt:last-of-type, .status dd:last-of-type { border-bottom: none; }
+  .pill {
+    display: inline-block; font-size: 0.76rem; font-weight: 600;
+    padding: 2px 9px; border-radius: 999px; margin-right: 6px;
+  }
+  .pill.ok { background: var(--success-soft); color: var(--success); }
+  .pill.warn { background: var(--warning-soft); color: var(--warning); }
+
+  .final {
+    margin-top: 40px; background: var(--ink); color: #FAF9F5;
+    border-radius: var(--radius-card); padding: 22px 24px;
+  }
+  .final .t { font-size: 0.78rem; letter-spacing: 0.12em; color: #A3A29C; margin-bottom: 8px; }
+  .final p { margin: 0; font-size: 1.04rem; line-height: 1.7; }
+  .final b { color: #E08A6B; }
+
+  footer { margin-top: 34px; color: var(--ink-muted); font-size: 0.82rem; }
+
+  @media (max-width: 720px) {
+    .states { grid-template-columns: repeat(2, 1fr); }
+    .status { grid-template-columns: 1fr; }
+    .status dt { border-bottom: none; padding-bottom: 0; }
+  }
+  @media print {
+    body { background: #fff; font-size: 12px; }
+    .wrap { max-width: none; padding: 0; }
+    h2 { page-break-after: avoid; }
+    table, .panel, .states { page-break-inside: avoid; }
+    .final { background: #fff; color: #000; border: 2px solid #000; }
+    .final .t { color: #555; }
+    .final b { color: #000; }
+  }
+</style>
+</head>
+<body>
+<div class="wrap">
+
+  <header>
+    <h1>Suture · 能力清单</h1>
+    <p class="lede">
+      给不熟悉技术的同事用的一个本地小程序：双击打开、点一次「开始检查」，
+      就知道本机的 AI 客户端能不能连上公司网关 <strong>AI Gate</strong>；
+      连不上时直接告诉他是哪儿的问题、怎么修，能安全自动修的就给按钮，处理完再测一次。
+    </p>
+  </header>
+
+  <div class="callout">
+    <p><b>覆盖三个客户端</b>：Claude Code CLI、Codex CLI、DeepSeek Harness。</p>
+    <p><b>交付形态</b>：单个可执行文件（Windows / macOS / Linux，各两种 CPU 架构），
+       不用装 Python、不用装任何依赖。</p>
+  </div>
+
+  <h2><span class="num">01</span>它怎么判：只看「能不能用」</h2>
+  <p class="h2sub">
+    判定标准只有一条——用客户端自己配的那套配置，真实发一个请求出去，通不通。
+    刻意<b>不</b>做逐项静态体检：非技术同事要的是「能不能用」，不是「哪里跟规范不一致」。
+    静态检查降级成「连不上时才跑的诊断器」，健康用户不会看到满屏报错。
+  </p>
+
+  <div class="states">
+    <div class="state">
+      <span class="n"><span class="dot ok"></span>已连接</span>
+      <span class="d">一个绿勾，不罗列任何细节</span>
+    </div>
+    <div class="state">
+      <span class="n"><span class="dot bad"></span>无法连接</span>
+      <span class="d">展开「可能的原因」，每条=一句人话+怎么修，挑着处理</span>
+    </div>
+    <div class="state">
+      <span class="n"><span class="dot warn"></span>未配置</span>
+      <span class="d">装了但没连网关 → 给配置面板，选模型+填 Key 一步到位</span>
+    </div>
+    <div class="state">
+      <span class="n"><span class="dot warn"></span>未安装</span>
+      <span class="d">引导去「安装 / 上手」页，用官方命令直接装</span>
+    </div>
+  </div>
+
+  <h2><span class="num">02</span>能发现并<b>自动解决</b>的问题</h2>
+  <p class="h2sub">这些点一下按钮就能修好，改完立刻重测，通不通当场反馈。</p>
+
+  <div class="panel">
+  <table>
+    <thead><tr><th class="i"></th><th>能发现的问题</th><th>做了什么</th></tr></thead>
+    <tbody>
+      <tr><td class="i">1</td><td class="what">地址前后多了空格</td><td>去掉空格</td></tr>
+      <tr><td class="i">2</td><td class="what">协议写成了 <code>http://</code>（网关要求 https）</td><td>补成 https</td></tr>
+      <tr><td class="i">3</td><td class="what">地址少了 <code>https://</code> 前缀</td><td>补上前缀</td></tr>
+      <tr><td class="i">4</td><td class="what">地址结尾多拼 / 少拼一段 <code>/v1</code></td><td>按该客户端的拼路径习惯改对</td></tr>
+      <tr><td class="i">5</td><td class="what">地址跟网关登记的不一致</td><td>改成登记地址</td></tr>
+      <tr><td class="i">6</td><td class="what">根本没配网关地址</td><td>写入网关规范地址</td></tr>
+      <tr><td class="i">7</td><td class="what"><b>Key 没放进网关要求的请求头</b><br>
+          <span style="color:var(--ink-muted);font-size:.88em">AI Gate 只认 <code>Token</code> 头，很多人放进了 <code>x-api-key</code></span></td>
+          <td>自动把 Key 写进 <code>headers.Token</code> / <code>ANTHROPIC_CUSTOM_HEADERS</code></td></tr>
+      <tr><td class="i">8</td><td class="what">Key 前后带了空格或换行（复制粘贴常见）</td><td>去掉首尾空白</td></tr>
+      <tr><td class="i">9</td><td class="what">模型名只差大小写 / 连字符写法（如 <code>GLM-5.3</code>）</td><td>改成网关登记的写法</td></tr>
+    </tbody>
+  </table>
+  </div>
+
+  <div class="callout good">
+    <p><b>第 7 条是实测最有价值的一条</b>：同样一把有效 Key，放进 <code>x-api-key</code>
+    一律 401，只有放进 <code>Token</code> 头才 200。</p>
+    <p>以前工具会误导用户「Key 失效了，去后台重新生成」——现在能直接点按钮补上。</p>
+  </div>
+
+  <h2><span class="num">03</span>能发现、需要用户<b>做一次选择或粘贴</b></h2>
+
+  <div class="panel">
+  <table>
+    <thead><tr><th class="i"></th><th>能发现的问题</th><th>用户要做的</th></tr></thead>
+    <tbody>
+      <tr><td class="i">10</td><td class="what">完全没配鉴权信息</td><td>粘贴一个网关后台生成的 Key</td></tr>
+      <tr><td class="i">11</td><td class="what">Key 确实失效 / 被后台吊销了（补头之后仍然 401）</td><td>重新生成 Key 后粘贴</td></tr>
+      <tr><td class="i">12</td><td class="what">Key 不是网关签发的<br>
+          <span style="color:var(--ink-muted);font-size:.88em">自动识别 Anthropic / OpenAI / Google 等厂商前缀，指出「这是别家的 Key」</span></td>
+          <td>换一个正确的 Key</td></tr>
+      <tr><td class="i">13</td><td class="what">模型不在网关路由表里，但有名字相近的<b>独立</b>型号</td>
+          <td>从候选下拉里选<br>
+          <span style="color:var(--ink-muted);font-size:.88em">不自动替换——会自动让人不知情地连到另一个模型，比报错更糟</span></td></tr>
+      <tr><td class="i">14</td><td class="what">模型完全不在路由表</td><td>从网关完整型号清单里选一个</td></tr>
+      <tr><td class="i">15</td><td class="what">没指定模型，且真实请求没跑通</td><td>从清单里选一个默认模型写进去</td></tr>
+      <tr><td class="i">16</td><td class="what">DeepSeek 一次注册了多个模型、坏了其中一个</td><td>只换掉坏的那个，<b>其余模型原样保留</b></td></tr>
+    </tbody>
+  </table>
+  </div>
+
+  <h2><span class="num">04</span>能发现，但只能在<b>工具外</b>处理</h2>
+  <p class="h2sub">给明确说明，不误导用户白点按钮。</p>
+
+  <div class="panel">
+  <table>
+    <thead><tr><th class="i"></th><th>能发现的问题</th><th>告诉用户什么</th></tr></thead>
+    <tbody>
+      <tr><td class="i">17</td><td class="what">配置文件语法错（JSON / TOML / YAML），整层配置不生效</td>
+          <td>指出文件位置和错误行列，让改完重新检查<br>
+          <span style="color:var(--ink-muted);font-size:.88em">并<b>拒绝自动修改</b>，见第 05 节</span></td></tr>
+      <tr><td class="i">18</td><td class="what"><b>文件不是 UTF-8 编码</b>（记事本存成 ANSI/GBK）</td>
+          <td>说明整份文件读不出来，让另存为 UTF-8</td></tr>
+      <tr><td class="i">19</td><td class="what">字段名拼错（写了工具不认识的键，等同没配）</td>
+          <td>给出最接近的正确字段名</td></tr>
+      <tr><td class="i">20</td><td class="what">配置存在但整层不生效（Codex 项目没被标记为可信）</td>
+          <td>说明「改这一层没用」，指出该改哪一层</td></tr>
+      <tr><td class="i">21</td><td class="what">生效值来自<b>系统环境变量</b>（优先级压过配置文件）</td>
+          <td>说明工具写不到环境变量，让去「系统设置 → 环境变量」改或删</td></tr>
+      <tr><td class="i">22</td><td class="what">生效值来自<b>公司统一下发的托管配置</b>（IT 下发、只读）</td>
+          <td>说明本地改了不生效，请联系 IT</td></tr>
+      <tr><td class="i">23</td><td class="what">同一项在<b>多层配置</b>里取值不一致</td>
+          <td>说明改哪一层、让用户把其它层统一掉</td></tr>
+      <tr><td class="i">24</td><td class="what">同一个 Key 在多个位置重复设置、值还不一样</td>
+          <td>摆出证据（哪个更像网关签发的 Key），让用户确认后删掉多余的</td></tr>
+      <tr><td class="i">25</td><td class="what"><b>客户端带不了网关要求的请求头</b><br>
+          <span style="color:var(--ink-muted);font-size:.88em">Codex 只能发 <code>Authorization</code>，无法附加自定义头</span></td>
+          <td>直接说明这条路走不通，建议改用 Claude Code 或 DeepSeek<br>
+          <span style="color:var(--ink-muted);font-size:.88em">不引导用户白填 Key</span></td></tr>
+      <tr><td class="i">26</td><td class="what">型号在清单里、地址也对，但网关实际拒绝（型号下线 / 改名）</td>
+          <td>说明可能已下线，联系网关确认</td></tr>
+      <tr><td class="i">27</td><td class="what"><b>请求在本机就没发出去</b>（Key 带换行导致请求头非法等）</td>
+          <td>点明是本地问题，让先处理下面的本地项<br>
+          <span style="color:var(--ink-muted);font-size:.88em">不再误报成「网关侧故障，联系值班人员」</span></td></tr>
+    </tbody>
+  </table>
+  </div>
+
+  <h2><span class="num">05</span>写配置的四条安全约定</h2>
+
+  <ol class="rules">
+    <li><b>永远先备份。</b>任何一次写入（修复 / 存 Key / 一键配置）都先备份到
+        <code>~/.suture/backups/&lt;时间戳&gt;/</code>，出问题能人工找回。</li>
+    <li><b>Key 不出现在界面上。</b>界面、日志、命令行、接口返回里一律只有掩码
+        （前 4 位 + 后 4 位）；网关抛出的异常原文也不外传（它可能带着请求头的值）。</li>
+    <li><b>读不懂的文件不写。</b>配置有语法错或编码不对时，如实报错并<b>拒绝写入</b>——
+        按读空的文件写回会把同一份配置里其它内容（permissions、hooks、其它插件配置）
+        静默清掉。宁可写不了，也不能悄悄清空别人机器上的配置。</li>
+    <li><b>写不进去的不给按钮。</b>生效层是环境变量或托管配置时，自动修复写了也不生效，
+        这种不给「修复」按钮（避免用户点了没反应、原地打转），只给说明。</li>
+  </ol>
+
+  <h2><span class="num">06</span>它不负责什么</h2>
+  <ul class="plain">
+    <li><b>不判断「是不是直连网关」</b>——只要真实请求能通就判已连接。客户端把地址指向
+        一个本地转发服务、请求返回 200 时也算通；口径是「能不能用」，不是「有没有按规范配」。</li>
+    <li><b>不比对公司规范</b>——不做配置项的合规审计，不检查「有没有多余字段」这类问题。</li>
+    <li><b>不改系统环境变量</b>——环境变量层面的配置只给指引。</li>
+    <li><b>不代管 Key</b>——Key 只在用户自己的机器上流转，不回传、不上报。</li>
+    <li><b>网关规则靠内置快照</b>——型号清单更新目前需要更新规则文件重新分发
+        （网关尚未提供可拉取的型号接口）。</li>
+  </ul>
+
+  <h2><span class="num">07</span>当前状态</h2>
+  <dl class="status">
+    <dt>功能</dt>
+    <dd>三个客户端 × 四态判定、逐条修复、一键配置、安装引导、图形界面，<b>全部可用</b></dd>
+    <dt>自动化测试</dt>
+    <dd><span class="pill ok">121 条全过</span>不依赖真实网关，用假网关覆盖各条判断分支</dd>
+    <dt>真实网关实测</dt>
+    <dd>已在 AI Gate 上端到端验证：<b>Claude Code 与 DeepSeek 直连可用</b>；
+        Codex 已定性为契约层面连不上（网关只认 <code>Token</code> 头，Codex 无法携带）</dd>
+    <dt>打包</dt>
+    <dd>六个平台组合的构建流水线已就绪；Linux x64 上实际打包运行过，其余五个需在对应机器上各跑一次</dd>
+    <dt>待办</dt>
+    <dd><span class="pill warn">代码签名</span>macOS 不签名用户打不开
+        <span class="pill warn">DeepSeek 安装命令</span>
+        <span class="pill warn">Windows 权限收紧</span></dd>
+  </dl>
+
+  <div class="final">
+    <div class="t">给同事的一句话用法</div>
+    <p>双击打开 → 点<b>「开始检查」</b> → 有绿勾就没事；有红 / 黄就照着上面的说明
+       点一下按钮，或者把说明截图发给 IT。装客户端去<b>「安装 / 上手」</b>页。</p>
+  </div>
+
+  <footer>Suture · AI Gate 连通体检</footer>
+</div>
+</body>
+</html>

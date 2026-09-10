@@ -77,11 +77,15 @@ def _send(base_url: str, auth_headers: Dict[str, str], model: str,
     payload = {"model": model, "max_tokens": 16,
                "messages": [{"role": "user", "content": "ping"}]}
     body = json.dumps(payload).encode("utf-8")
-    req = urllib.request.Request(_endpoint(base_url, suffix), data=body,
-                                 headers=_headers(auth_headers), method="POST")
     started = time.time()
     status, exc = None, None
     try:
+        # 构造请求本身也会失败：地址少了 https:// 前缀 → ValueError: unknown url
+        # type；鉴权值里带了换行 → http.client.InvalidURL。这一步必须留在 try 里，
+        # 否则异常会绕过 _classify 直接抛给调用方——检查页整个崩掉、界面只剩一句
+        # 英文 "Failed to fetch"，而这两类恰好都有专门的中文说明等着用。
+        req = urllib.request.Request(_endpoint(base_url, suffix), data=body,
+                                     headers=_headers(auth_headers), method="POST")
         with urllib.request.urlopen(req, timeout=timeout) as resp:
             status = resp.status
             resp.read()

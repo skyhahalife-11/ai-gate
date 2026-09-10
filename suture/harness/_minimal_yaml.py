@@ -43,6 +43,11 @@ def _scalar(raw: str, lineno: int) -> Any:
     if s[0] in "|>":
         raise MiniYamlError(f"第 {lineno} 行用到了块标量（{s[0]}），这个读取器不支持这种写法")
     if s[0] in "[{":
+        # 空集合是例外：`{}` / `[]` 没有歧义，而且写出时本来就会生成它们（见 _emit），
+        # 解析器再不认就等于自己写的文件自己读不懂——那会让下一次读取把整份文件
+        # 判成"语法错"，进而触发"读不懂就不写"。其余流式写法照旧拒绝。
+        if s in ("{}", "[]"):
+            return {} if s == "{}" else []
         raise MiniYamlError(f"第 {lineno} 行用到了流式写法（{s[0]}），这个读取器不支持这种写法")
     if len(s) >= 2 and s[0] == s[-1] and s[0] in ("'", '"'):
         return s[1:-1]
@@ -215,7 +220,15 @@ def _render_scalar(v: Any) -> str:
         return "true" if v else "false"
     if isinstance(v, (int, float)):
         return str(v)
-    return _quote(str(v))
+    s = str(v)
+    if "\n" in s or "\r" in s:
+        # 换行在 YAML 里必须用块标量（| / >）才能表达，而这个读取器不支持块标量。
+        # 硬写出去会得到一个自己读不回来的文件——下一次读取会把整份配置判成语法错，
+        # 再往后就是"读不懂就不写"，用户彻底卡住。宁可在这里明确报错。
+        raise MiniYamlError(
+            "要写入的值里有换行符，这个受限的 YAML 写出器无法安全表示它。"
+            "多半是复制 Key 时把换行一起粘了进来，请去掉首尾空白后重试。")
+    return _quote(s)
 
 
 def dump(value: Any) -> str:

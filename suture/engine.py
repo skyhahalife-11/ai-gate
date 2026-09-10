@@ -18,7 +18,7 @@ from . import fixer, gateway, selftest
 from .checks import auth_incompatible_issue, auth_requirement_unsatisfiable, blocked_reasons
 from .harness import ALL_ADAPTERS, get_adapter
 from .harness.base import (
-    FIELD_AUTH, FIELD_BASE_URL, FIELD_MODEL, HarnessConfig, RefuseWrite,
+    FIELD_AUTH, FIELD_BASE_URL, FIELD_EXTRA_HEADER, FIELD_MODEL, HarnessConfig, RefuseWrite,
 )
 from .profile import expected_base_url, expected_base_urls, load_profile, model_ids
 
@@ -386,6 +386,16 @@ class Engine:
         if not fix_field or fix_value is None or str(fix_value) == "":
             return {"result": RESULT_MANUAL, "message": "请选择要应用的值。",
                     "steps": steps, "backup_dir": None}
+        # 鉴权类字段的值先去掉首尾空白再写。这个载荷是"原始 Key"，而它带多余空白
+        # 正是 auth-whitespace 这条要修的病；不 strip 就直接写，等于把「Key 末尾有
+        # 换行」这个病原样搬进新文件（DeepSeek 的 YAML 写出器甚至表示不了换行）。
+        # input 分支一直是 strip 过的，这里跟它对齐。
+        if str(fix_field) in (FIELD_AUTH, FIELD_EXTRA_HEADER):
+            stripped = str(fix_value).strip()
+            if not stripped:
+                return {"result": RESULT_MANUAL, "message": "这个值去掉空白后是空的，请重新输入。",
+                        "steps": steps, "backup_dir": None}
+            fix_value = stripped
         changes = {str(fix_field): str(fix_value)}
         manifest = fixer.backup_files(adapter.writable_paths(cfg), home=self.home)
         self._backups[client_id] = manifest
@@ -487,16 +497,29 @@ class Engine:
                 "steps": steps, "client": asdict(client)}
 
 
-def report_to_dict(report: Report) -> Dict[str, Any]:
-    """报告要能直接序列化给界面。
+def redact_client(payload: Dict[str, Any]) -> Dict[str, Any]:
+    """把一份序列化后的 ClientState 里的敏感值抹掉。
 
-    这里是唯一出网的出口，所以就地做一次脱敏：issue 里的 `fix_value` 可能是
-    原始 Key（补 Token 头、去掉首尾空白这两条修复的载荷都是它）。界面完全用不到
-    这个字段——点「修复」时前端只发 {client_id, issue_id}，真正的值由服务端从
-    自己那份 last_report 里取。所以出网前统一删掉，Key 在界面/接口返回里永远
-    只以掩码（前 4 + 后 4）的形式出现。"""
+    `fix_value` 可能是原始 Key（补 Token 头、去掉首尾空白这两条修复的载荷都是它）。
+    界面完全用不到这个字段——点「修复」时前端只发 {client_id, issue_id}，真正的值
+    由服务端从自己那份 last_report 里取。所以任何一份要发给浏览器的客户端数据都先
+    过这里，Key 在界面/接口返回里永远只以掩码（前 4 + 后 4）的形式出现。
+
+    注意：这是"按字段名"脱敏，不是只给某一条路由用。会返回客户端数据的路由有
+    四条（/api/check、/api/action、/api/configure、/api/recheck），只堵其中一条
+    等于没堵——上一轮就是只在 report_to_dict 里做，另外三条照样漏。
+    """
+    if not isinstance(payload, dict):
+        return payload
+    for issue in payload.get("issues") or []:
+        if isinstance(issue, dict):
+            issue.pop("fix_value", None)
+    return payload
+
+
+def report_to_dict(report: Report) -> Dict[str, Any]:
+    """报告要能直接序列化给界面（出网前统一脱敏，见 redact_client）。"""
     payload = asdict(report)
     for client in payload.get("clients") or []:
-        for issue in client.get("issues") or []:
-            issue.pop("fix_value", None)
+        redact_client(client)
     return payload

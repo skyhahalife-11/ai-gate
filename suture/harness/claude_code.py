@@ -218,6 +218,9 @@ class ClaudeCodeAdapter(HarnessAdapter):
         # x-api-key/Authorization。只挑出网关认的那几个头名，避免把无关的自定义头
         # 误判成鉴权信息。
         custom_headers = build_resolved("custom_headers", layers_for(ENV_CUSTOM_HEADERS))
+        # 记下这个变量实际来自哪一层：判定层要据此判断「往 settings.json 补 Token 头
+        # 到底有没有用」——来自系统环境变量时，补在文件里不会生效。
+        cfg.custom_headers_source_layer = custom_headers.source_layer
         if custom_headers.is_set:
             for name, value in _parse_custom_headers(custom_headers.value):
                 if name.lower() in accepted_lower:

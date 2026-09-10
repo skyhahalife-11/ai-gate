@@ -91,6 +91,18 @@ def run_install(adapter, env: Optional[Dict[str, str]] = None,
         return {"ok": False, "ran": False, "timed_out": False,
                 "output": "", "message": runtime_guide()}
 
+    # Windows 上 npm 只有 npm.cmd（nodejs.org 的安装包不带 npm.exe），而
+    # CreateProcess 不会按 PATHEXT 去补扩展名：上面 check_runtime 用 shutil.which
+    # 明明找得到 npm，这里直接 Popen(["npm", ...]) 却一定抛 WinError 2。必须先解析
+    # 成真实路径再执行，两边口径才一致。
+    exe = shutil.which(cmd[0], path=env.get("PATH") or os.environ.get("PATH"))
+    if exe is None:
+        # 上面 npm 的检查放过了、这里仍然找不到——如实说清楚，别把 WinError 2 抛给用户。
+        return {"ok": False, "ran": False, "timed_out": False, "output": "",
+                "message": f"找不到可执行的 {cmd[0]}。请确认它已安装、并且终端里的 PATH "
+                           f"能定位到它；装 Node.js 请到 nodejs.org 下载 LTS 版。"}
+    cmd = [exe] + list(cmd[1:])
+
     shown = " ".join(cmd)
     creationflags = 0
     if os.name == "nt":

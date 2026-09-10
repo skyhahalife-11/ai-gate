@@ -41,6 +41,16 @@ def write_text(path: str, text: str) -> None:
         f.write(text)
 
 
+def read_text(path: str) -> str:
+    with open(path, "r", encoding="utf-8") as f:
+        return f.read()
+
+
+def read_bytes(path: str) -> bytes:
+    with open(path, "rb") as f:
+        return f.read()
+
+
 def subprocess_env(**overrides) -> dict:
     """给要 subprocess.run 的子进程拼一份隔离环境。
     Windows 上 socket()/ThreadingHTTPServer 需要能找到 SystemRoot 才能初始化

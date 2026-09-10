@@ -174,6 +174,15 @@ class CodexAdapter(HarnessAdapter):
             return project
         return next(f for f in cfg.files if f.layer == "用户级配置")
 
+    def unparseable_write_target(self, cfg: HarnessConfig) -> Optional[str]:
+        """Codex 的 apply 是按文本定点替换的，但目标整份读不出来时同样不能写
+        （apply 里会 RefuseWrite）。判定层据此不给按钮，别让用户点了才知道。
+        只在目标层本来就不会生效时返回（那种情况下 apply 根本不写它）。"""
+        target = self._target_file(cfg)
+        if target.exists and not target.parse_ok:
+            return target.path
+        return None
+
     def apply(self, cfg: HarnessConfig, changes: Dict[str, str],
               env=None, home=None, project_dir=None) -> List[str]:
         target = self._target_file(cfg)
@@ -189,8 +198,13 @@ class CodexAdapter(HarnessAdapter):
                 raise RefuseWrite(
                     f"{target.path} 不是 UTF-8 编码（多半是被编辑器存成了 ANSI/GBK），"
                     "为避免把文件内容改坏，这里不自动修改。请先另存为 UTF-8 再试。")
-            except OSError:
-                text = ""
+            except OSError as exc:
+                # 读不出来（权限、被占用、路径其实是个目录）就当成"文件是空的"继续写，
+                # 等于把整份 config.toml 替换成只有本次改动的那一小段。跟编码读不出来
+                # 一样处理：拒绝写，说清楚原因。
+                raise RefuseWrite(
+                    f"{target.path} 读取失败（{exc}），"
+                    "为避免把文件里其它内容覆盖掉，这里不自动修改。")
 
         described: List[str] = []
         for logical, value in changes.items():

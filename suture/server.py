@@ -159,7 +159,14 @@ class Handler(BaseHTTPRequestHandler):
             eng = self.state.engine
 
             if path == "/api/check":
-                report = eng.run(client_ids=payload.get("client_ids"))
+                # 这是唯一会跑完整检查的路由，也是唯一不能让它抛出去的路由：
+                # 抛出去前端只会看到一句英文 "Failed to fetch"，用户既不知道为什么、
+                # 也没有任何可操作的信息。所有其它路由都有同样的兜底。
+                try:
+                    report = eng.run(client_ids=payload.get("client_ids"))
+                except Exception as exc:      # noqa: BLE001
+                    self._send_json({"error": f"检查失败：{exc}"}, 500)
+                    return
                 self.state.last_report = report
                 self._send_json(E.report_to_dict(report))
                 return
@@ -185,7 +192,7 @@ class Handler(BaseHTTPRequestHandler):
                 # 否则用户紧接着点新出现的 issue 会在旧报告里找不到而报 409。
                 if result.get("client"):
                     self._record_client(result["client"])
-                self._send_json(result)
+                self._send_json(_redact_result(result))
                 return
 
             if path == "/api/recheck":
@@ -199,7 +206,7 @@ class Handler(BaseHTTPRequestHandler):
                     self._send_json({"error": f"重新检查失败：{exc}"}, 500)
                     return
                 self._record_client(asdict(client))
-                self._send_json({"client": asdict(client)})
+                self._send_json({"client": E.redact_client(asdict(client))})
                 return
 
             if path == "/api/configure":
@@ -215,10 +222,18 @@ class Handler(BaseHTTPRequestHandler):
                     return
                 if result.get("client"):
                     self._record_client(result["client"])
-                self._send_json(result)
+                self._send_json(_redact_result(result))
                 return
 
         self._send_json({"error": "not found"}, 404)
+
+
+def _redact_result(result: Dict[str, Any]) -> Dict[str, Any]:
+    """apply_action / configure_client 的返回值里带着一份客户端数据，
+    出网前统一脱敏（服务端自己的 last_report 仍保留原始值，点「修复」时要用）。"""
+    if isinstance(result, dict) and isinstance(result.get("client"), dict):
+        E.redact_client(result["client"])
+    return result
 
 
 def create_server(engine: E.Engine, port: int = 0):

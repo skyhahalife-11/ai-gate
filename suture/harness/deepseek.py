@@ -281,23 +281,41 @@ class DeepSeekHarnessAdapter(HarnessAdapter):
         home = resolve_home(home, env)
         hh = harness_home(env, home)
         creds_path = os.path.join(hh, ".credentials.yaml")
-        creds: Dict[str, Any] = {"version": 1, "refs": {}}
+        # 这份文件里可能还存着别的厂商的凭据（refs 段是一个共用表）。读不懂它却
+        # 照写回去 = 用一份只含本次改动的文件覆盖整份凭据，别人的 Key 会被静默
+        # 抹掉，而且还要报「已保存」。跟 settings.yaml 一个口径：读不懂就不写。
         if os.path.exists(creds_path):
             try:
                 with open(creds_path, "r", encoding="utf-8") as f:
                     parsed = yaml.parse(f.read())
-                if isinstance(parsed, dict):
-                    creds = dict(parsed)
-                    if not isinstance(creds.get("refs"), dict):
-                        creds["refs"] = {}
-            except (yaml.MiniYamlError, UnicodeDecodeError, OSError):
-                creds = {"version": 1, "refs": {}}
+            except (yaml.MiniYamlError, UnicodeDecodeError, OSError) as exc:
+                raise RefuseWrite(
+                    f"{creds_path} 读不懂（{exc}）"
+                    "为避免把这份文件里其它厂商的凭据一起覆盖掉，这里不自动修改。"
+                    "请先把这份文件修好（或另存为 UTF-8），再重新保存 Key。")
+            if not isinstance(parsed, dict):
+                raise RefuseWrite(
+                    f"{creds_path} 的内容不是一份键值配置（顶层是个"
+                    f"{type(parsed).__name__}），为避免覆盖掉里面的其它内容，这里不自动修改。")
+            if "refs" in parsed and not isinstance(parsed.get("refs"), dict):
+                # 原来 refs 不是映射（比如写成了列表）：直接写回同样会丢内容。
+                raise RefuseWrite(
+                    f"{creds_path} 里的 refs 段不是键值形式，为避免把已有内容覆盖掉，"
+                    "这里不自动修改。请先把 refs 改回「名字: 值」的形式再重试。")
+            creds = dict(parsed)
+        else:
+            creds = {"version": 1, "refs": {}}
         refs = dict(creds.get("refs") or {})
         refs["AI_GATE_API_KEY"] = key
         creds["refs"] = refs
+        try:
+            body = yaml.dump(creds)
+        except yaml.MiniYamlError as exc:
+            # 写出器表达不了的值（比如 Key 里带了换行）。此时还没碰过文件。
+            raise RefuseWrite(f"无法写入凭据文件：{exc}") from exc
         os.makedirs(hh, exist_ok=True)
         with open(creds_path, "w", encoding="utf-8") as f:
-            f.write(yaml.dump(creds))
+            f.write(body)
         try:
             os.chmod(creds_path, 0o600)
         except OSError:
@@ -310,9 +328,14 @@ class DeepSeekHarnessAdapter(HarnessAdapter):
                 "改完需重开 DeepSeek Harness 才会读到新的 Key。")
 
     def unparseable_write_target(self, cfg: HarnessConfig) -> Optional[str]:
-        user_file = next((f for f in cfg.files
-                          if f.layer == "用户层 settings.yaml" and f.exists and not f.parse_ok), None)
-        return user_file.path if user_file is not None else None
+        # 存 Key 会写两个文件：用户层 settings.yaml 和 .credentials.yaml（后者不在
+        # cfg.files 的配置层语义里，但 read() 已经把它一起读过了）。任何一个读不懂，
+        # 写进去都是整份覆盖，判定层就不该给「保存 Key」按钮。
+        for layer in ("用户层 settings.yaml", "凭据文件 .credentials.yaml"):
+            fs = next((f for f in cfg.files if f.layer == layer), None)
+            if fs is not None and fs.exists and not fs.parse_ok:
+                return fs.path
+        return None
 
     def apply(self, cfg: HarnessConfig, changes: Dict[str, str],
               env=None, home=None, project_dir=None) -> List[str]:

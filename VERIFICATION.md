@@ -1,6 +1,6 @@
 # 验收记录
 
-`python3 -m unittest discover -s tests -t .` —— 86 条，全部通过（1 条在 root 下跳过，
+`python3 -m unittest discover -s tests -t .` —— 121 条，全部通过（1 条在 root 下跳过，
 已另行以普通用户身份验证）。测试不依赖真实网关，用 `mock_gateway.py` 起一个假网关，
 让它表现成各种情况来触发每条判断分支。
 
@@ -268,7 +268,7 @@
 对 `main`（`77a4474`）再做一轮只读审查（判定/可达性/适配器 与 界面/服务端 两路并行），
 逐条对照源码核验并在沙箱里复现。确认 7 条缺陷 + 5 条体验问题，其中 **P0/P1 六条已修**
 （问题 6 与 1 同属一条链路，顺手一并改掉），全部新增回归验收见
-`tests/test_review_fixes.py`（13 条）。修复后的全量：**109 条全过，跳过 1**。
+`tests/test_review_fixes.py`（13 条）。这一轮修复后的全量：**109 条全过，跳过 1**（2026-09-10 第三轮又补 12 条，当前基线 121 条）。
 完整清单与未修项见仓库根目录 `REVIEW-2026-09-10.md`。
 
 | 类别 | 确认的问题 | 修法 |
@@ -286,6 +286,37 @@
 Windows 的 chmod 空操作、以及 5 条体验类问题（configure 的 note 不渲染、安装页并发、
 英文报错与静默失败、安装失败无输出区、检查无进度）保持原样，已记进
 `REVIEW-2026-09-10.md` 待定。
+
+## 2026-09-10 第三轮：同类缺陷清扫（打包前）
+
+第二轮修的是**实例**不是**类**，这一轮按「还有哪些位置是同一个病」重新枚举，
+五个修复里有四个都漏了同类位置。新增回归验收见 `tests/test_packaging_fixes.py`
+（12 条）。修复后的全量：**121 条全过，跳过 1**（跳过的仍是「POSIX 权限位」那条，
+Windows 上造不出真实写入失败，属平台限制）。完整清单见 `REVIEW-2026-09-10.md` 第三轮。
+
+| 类别 | 漏掉的同类位置 | 修法 |
+|---|---|---|
+| 崩溃 | `Request(...)` 写在 `try` 之外——地址少写 `https://` 抛的 `ValueError`、鉴权值带换行抛的 `http.client.InvalidURL` 都在**构造**时就发生，绕过 `_classify` 直接抛出，界面只剩英文 "Failed to fetch"，而这两类恰好都有专门的中文说明等着用 | `Request(...)` 移进 `try`，两类失败归到已有的 `base_url` / 本地原因分支 |
+| 安装 | `check_runtime` 用 `shutil.which` 找得到 npm，`Popen(["npm", ...])` 却必抛 WinError 2——Windows 上 npm 只有 `npm.cmd`，`CreateProcess` 不按 `PATHEXT` 补扩展名 | 执行前先把 `cmd[0]` 解析成真实路径；真找不到时给中文指引，不再把 WinError 抛给用户 |
+| 数据丢失 | `deepseek.store_key` 先写的 `.credentials.yaml`（**多厂商共用**的 `refs` 段）读不懂时照样整份覆盖 → 别人的 Key 被静默抹掉还报「已保存」；codex 的 `except OSError` 降级成「文件是空的」同样会整份重写 | 两处都 `RefuseWrite`；`.credentials.yaml` 的三种坏形态（非 UTF-8 / 流式写法 / `refs` 不是映射）分别判定；能正常读时照旧合并。`unparseable_write_target` 补上 codex，且按 harness 报出**所有**会整文件重写的层 |
+| 安全 | `report_to_dict` 之外，`/api/action`、`/api/configure`、`/api/recheck` 也返回客户端数据 → 换个路由照样把原始 Key 发给浏览器 | 抽成 `engine.redact_client()`，四条路径共用；服务端自己那份 `last_report` 保留原值（点「修复」要用） |
+| 无效修复 | 只读守卫按**层名字精确匹配**，而三个适配器给环境变量层的命名各不相同（`环境变量` / `环境变量 AI_GATE_API_KEY` / `启动时的环境变量` / 两种 `.env`）→ auth 类字段照样给死按钮 | 新增 `_is_env_like_layer()` 按**来源性质**判断，`_cannot_write(cfg, keys)` 统一收口，`auth-header` / `auth-ref` / `auth` 三条分支与 e2e 兜底都改走它 |
+
+**本轮顺带发现的「自己写坏自己的文件」**（不在任何一份审查报告里）：
+
+- `_minimal_yaml` 的写出器会生成 `{}` / `[]`，解析器却对 `[` `{` 一律拒绝 →
+  下次读取把整份配置判成语法错 → 触发「读不懂就不写」→ 用户彻底卡住。空集合没有
+  歧义，解析器现在放行这两个特例，其余流式写法照旧拒绝。
+- Key 粘贴时带换行 → 写出器把换行原样写进 YAML（YAML 里换行必须用块标量，
+  这个受限写出器不支持）→ 同样得到自己读不回来的文件。现在写出器遇换行**明确报错**
+  并提示「多半是复制 Key 时把换行一起粘了进来」。
+- 配套：`apply_action` 的 auto/choice 分支原先**不 strip**，而它的载荷正是
+  「Key 末尾有换行」这个病本身——原样写进去等于把病原封不动搬进新文件。现已与
+  `input` 分支对齐。
+
+**还没做**：Windows 的 chmod 空操作仍是文档口径问题（REVIEW 第 2 条）；3 条低危
+体验项（WebView 回退死胡同、备份同秒同名、codex 判定口径）已在 REVIEW 第三轮
+「本轮未修」里记录。
 
 ## 还没验证的
 

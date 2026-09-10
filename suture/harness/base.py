@@ -102,6 +102,9 @@ class HarnessConfig:
     auth_header: str = "x-api-key"            # 这个客户端实际会发哪个请求头
     auth_conflict: Optional[str] = None       # 两处同时填了鉴权信息时的说明
     extra_auth_headers: List[ExtraAuthHeader] = field(default_factory=list)
+    # ANTHROPIC_CUSTOM_HEADERS 这类自定义头变量的值实际来自哪一层（claude_code 填，
+    # 其余 harness 留空）。判定层据此判断「往配置文件补 Token 头」是否真的生效。
+    custom_headers_source_layer: str = ""
 
     # DeepSeek Harness 的模型是一份注册清单而不是单个选中值，单独放在这里，
     # 每一项都要对着网关路由表校验。另外两个 harness 这里为空。

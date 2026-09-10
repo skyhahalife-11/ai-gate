@@ -482,16 +482,35 @@ def e2e_hint(e2e: Optional[Dict[str, Any]]) -> str:
     return "unknown"
 
 
+def _is_env_like_layer(name: str) -> bool:
+    """这一层的值来自「进程/系统环境变量」而不是某个配置文件。
+
+    三个适配器给这种层的命名并不统一（claude 是「环境变量」，codex 是
+    「环境变量 AI_GATE_API_KEY」，deepseek 是「启动时的环境变量」以及两种 .env），
+    所以按名字精确匹配会漏。这里统一按"是不是环境变量类来源"判断。"""
+    if not name:
+        return False
+    if name.startswith("环境变量") or name in ("启动时的环境变量",):
+        return True
+    # deepseek 的 dotenv 来源：「项目目录下的 .env」「harness home 下的 .env」。
+    # Suture 从不写 .env 文件，所以这类同样改不到。
+    return name.endswith(".env")
+
+
 def _readonly_layers(cfg: HarnessConfig, key: str) -> List[str]:
     """这个字段实际生效的那一层是不是「Suture 写不到」的层，返回合适的说法。
 
     环境变量（OS 级，Suture 只写配置文件）和组织托管配置（IT 下发、只读）都属于
-    这类：给了「修复」按钮也是写了不生效，用户点了没反应、原地循环。"""
+    这类：给了「修复」按钮也是写了不生效，用户点了没反应、原地循环。
+
+    注意这里必须按「实际生效的那一层」判断，而不是按"Suture 打算写的那个文件"
+    判断——两者不一致时，写了就是白写。这条规则对 auth 字段同样成立：Key 放在
+    系统环境变量里时，往 settings.json 补 Token 头一点用都没有。"""
     rf = cfg.field(key)
     names: List[str] = []
     if not rf.is_set or not rf.source_layer:
         return names
-    if rf.source_layer == "环境变量":
+    if _is_env_like_layer(rf.source_layer):
         names.append("系统环境变量")
     if any(lv.managed and lv.effective for lv in rf.layers):
         names.append("组织统一下发的托管配置")
@@ -508,6 +527,31 @@ def _write_target_unreadable(cfg: HarnessConfig) -> bool:
         return get_adapter(cfg.harness_id).unparseable_write_target(cfg) is not None
     except Exception:      # noqa: BLE001 —— 判定层不该因为适配器的小毛病整轮失败
         return False
+
+
+def _cannot_write(cfg: HarnessConfig, keys: List[str]) -> bool:
+    """这批字段里的自动修复写了到底会不会生效。
+
+    两种不生效的情况：生效层是 Suture 改不到的（环境变量/托管配置），或者要写的
+    文件本身读不懂（写进去会整份覆盖，适配器会 RefuseWrite）。命中任一条就不该给
+    按钮——点了不是原地循环就是必然报错。"""
+    if _write_target_unreadable(cfg):
+        return True
+    return any(_readonly_source(cfg, k) for k in keys)
+
+
+def _why_cannot_write(cfg: HarnessConfig, key: str) -> str:
+    """给「这类原因在当前情况下改不了」配一句可操作的说明。"""
+    if _write_target_unreadable(cfg):
+        return ("要修改的配置文件现在读不懂（多半是语法错或编码不对），Suture 不会在"
+                "这种情况下写入——那会把同一份文件里其它设置一起覆盖掉。"
+                "请先按上面的说明把文件修好，再重新检查。")
+    names = _readonly_layers(cfg, key)
+    if "组织统一下发的托管配置" in names:
+        return ("这一项来自公司统一下发的托管配置（只读），本地改了也不生效。"
+                "请联系 IT 调整，或在没有下发限制的机器上使用。")
+    return ("这一项来自系统环境变量，优先级压过配置文件，Suture 改不到它。"
+            "请到「系统设置 → 环境变量」里把它改成正确的值或删除，再重新检查。")
 
 
 def finding_to_issue(f: Finding, cfg: HarnessConfig) -> Dict[str, Any]:
@@ -559,26 +603,45 @@ def finding_to_issue(f: Finding, cfg: HarnessConfig) -> Dict[str, Any]:
             cur["fix_field"] = f.fix_field
             cur["fix_value"] = f.fix_value
     elif key == "auth-whitespace":
-        cur["title"] = "Key 前后有多余的空格或换行"
-        cur["repair_kind"] = "auto"
-        cur["fix_field"] = f.fix_field
-        cur["fix_value"] = f.fix_value
-    elif key == "auth-ref":
-        if f.fixable == FIXABLE_YES:
-            cur["title"] = "鉴权引用没写好"
+        if _cannot_write(cfg, [FIELD_AUTH]):
+            # 生效的 Key 来自环境变量/托管配置，或要写的文件读不懂：改文件不生效、
+            # 或者写进去会整份覆盖。只说明，不给按钮。
+            cur["title"] = "Key 前后有多余的空格或换行（当前情况下改配置文件不生效）"
+            cur["repair_kind"] = "external"
+            cur["detail"] = f.detail + " " + _why_cannot_write(cfg, FIELD_AUTH)
+        else:
+            cur["title"] = "Key 前后有多余的空格或换行"
             cur["repair_kind"] = "auto"
             cur["fix_field"] = f.fix_field
             cur["fix_value"] = f.fix_value
+    elif key == "auth-ref":
+        if f.fixable == FIXABLE_YES:
+            if _cannot_write(cfg, [FIELD_AUTH]):
+                cur["title"] = "鉴权引用没写好（当前情况下改配置文件不生效）"
+                cur["repair_kind"] = "external"
+                cur["detail"] = f.detail + " " + _why_cannot_write(cfg, FIELD_AUTH)
+            else:
+                cur["title"] = "鉴权引用没写好"
+                cur["repair_kind"] = "auto"
+                cur["fix_field"] = f.fix_field
+                cur["fix_value"] = f.fix_value
         else:
             cur["title"] = "Key 还没设置"
+            cur["repair_kind"] = "input" if not _cannot_write(cfg, [FIELD_AUTH]) else "external"
+            if cur["repair_kind"] == "input":
+                cur["fix_field"] = FIELD_AUTH
+                cur["prompt"] = "在 AI Gate 后台生成 Key 后粘贴到这里"
+            else:
+                cur["detail"] = _why_cannot_write(cfg, FIELD_AUTH)
+    elif key == "auth":
+        cur["title"] = "鉴权信息有问题（Key 缺失或不对）"
+        if _cannot_write(cfg, [FIELD_AUTH]):
+            cur["repair_kind"] = "external"
+            cur["detail"] = _why_cannot_write(cfg, FIELD_AUTH)
+        else:
             cur["repair_kind"] = "input"
             cur["fix_field"] = FIELD_AUTH
             cur["prompt"] = "在 AI Gate 后台生成 Key 后粘贴到这里"
-    elif key == "auth":
-        cur["title"] = "鉴权信息有问题（Key 缺失或不对）"
-        cur["repair_kind"] = "input"
-        cur["fix_field"] = FIELD_AUTH
-        cur["prompt"] = "在 AI Gate 后台生成 Key 后粘贴到这里"
     elif key.startswith("auth-extra:"):
         cur["title"] = "自定义请求头里的 Key 不像是网关签发的"
         cur["repair_kind"] = "none"
@@ -643,22 +706,28 @@ def _e2e_fallback(cfg: HarnessConfig, profile: Dict[str, Any], e2e: Optional[Dic
             "fix_field": None, "fix_value": None, "choices": [], "prompt": None,
         }]
     if hint == "auth":
+        cannot = _cannot_write(cfg, [FIELD_AUTH])
         return [{
             "id": "auth", "title": "网关拒绝了这个 Key（可能已失效或被后台吊销）",
-            "detail": "网关返回了鉴权错误，但本机配置看起来没问题——最常见是 Key 在网关后台"
-                      "被重新生成或吊销了。重新生成一个粘贴进来。",
-            "current_value": "", "severity": "high", "repair_kind": "input",
-            "fix_field": FIELD_AUTH, "fix_value": None, "choices": [],
-            "prompt": "在 AI Gate 后台重新生成 Key 后粘贴到这里",
+            "detail": ("网关返回了鉴权错误，但本机配置看起来没问题——最常见是 Key 在网关后台"
+                       "被重新生成或吊销了。重新生成一个粘贴进来。"
+                       if not cannot else _why_cannot_write(cfg, FIELD_AUTH)),
+            "current_value": "", "severity": "high",
+            "repair_kind": "external" if cannot else "input",
+            "fix_field": None if cannot else FIELD_AUTH, "fix_value": None, "choices": [],
+            "prompt": None if cannot else "在 AI Gate 后台重新生成 Key 后粘贴到这里",
         }]
     if hint == "model" and not cfg.field(FIELD_MODEL).is_set and not cfg.model_candidates:
+        cannot = _cannot_write(cfg, [FIELD_MODEL])
         return [{
             "id": "model", "title": "没指定模型，默认模型网关可能不认",
-            "detail": "端到端请求没成功，而且客户端里没指定用哪个模型。从网关支持的列表里"
-                      "选一个默认模型写进去。",
-            "current_value": "", "severity": "high", "repair_kind": "choice",
-            "fix_field": FIELD_MODEL, "fix_value": None,
-            "choices": [{"label": m, "value": m} for m in known],
+            "detail": ("端到端请求没成功，而且客户端里没指定用哪个模型。从网关支持的列表里"
+                       "选一个默认模型写进去。"
+                       if not cannot else _why_cannot_write(cfg, FIELD_MODEL)),
+            "current_value": "", "severity": "high",
+            "repair_kind": "external" if cannot else "choice",
+            "fix_field": None if cannot else FIELD_MODEL, "fix_value": None,
+            "choices": [] if cannot else [{"label": m, "value": m} for m in known],
             "prompt": None,
         }]
     if hint == "model":
@@ -679,6 +748,14 @@ def _e2e_fallback(cfg: HarnessConfig, profile: Dict[str, Any], e2e: Optional[Dic
                            "清单里、地址也正确——最可能是这个型号在网关侧已下线或改名，型号"
                            "清单（内置快照）还没跟上。请联系网关确认现在可用的型号，或换一个"
                            "型号再试；清单更新后重新检查即可。"),
+                "current_value": "", "severity": "high", "repair_kind": "external",
+                "fix_field": None, "fix_value": None, "choices": [], "prompt": None,
+            }]
+        if _cannot_write(cfg, [FIELD_BASE_URL]):
+            return [{
+                "id": "base_url", "title": "请求没到网关（地址或路径可能不对）",
+                "detail": ("静态判断都符合登记值，但真实请求仍失败。"
+                           + _why_cannot_write(cfg, FIELD_BASE_URL)),
                 "current_value": "", "severity": "high", "repair_kind": "external",
                 "fix_field": None, "fix_value": None, "choices": [], "prompt": None,
             }]
@@ -792,14 +869,27 @@ def _auth_header_issue(cfg: HarnessConfig,
         return None
     adapter = get_adapter(cfg.harness_id)
     auto = adapter.supports_extra_auth_header
+    # 补头是"往配置文件里那个自定义头变量追加一行"。如果这个变量本身就来自系统
+    # 环境变量，文件里补的那行根本不会生效——用户会一直点、401 一直回来。这跟
+    # base_url / model 那两条是同一个陷阱，所以同样不给按钮，改成外部说明。
+    if auto and _is_env_like_layer(cfg.custom_headers_source_layer):
+        auto = False
+    if auto and _write_target_unreadable(cfg):
+        auto = False
+    if auto:
+        tail = ""
+    elif adapter.supports_extra_auth_header:
+        # 客户端本身有这个机制，只是这次写不进去——说清楚为什么写不了。
+        tail = " " + _why_cannot_write(cfg, FIELD_EXTRA_HEADER)
+    else:
+        # 客户端压根没有可附加自定义请求头的位置（codex），补头这条路本身就走不通。
+        tail = f" 需要在客户端配置里补上这个 {required} 请求头，Suture 暂时不能自动帮你写。"
     return {
         "id": "auth-header",
         "title": f"Key 没放进网关要求的 {required} 请求头",
         "detail": (f"AI Gate 只从 {required} 请求头读取 Key；当前配置把 Key 放在 "
                    f"{cfg.auth_header} 头发送（或只放在普通自定义头里），网关读不到，"
-                   "所以即使 Key 有效也会一直 401。"
-                   + ("" if auto else
-                      f" 需要在客户端配置里补上这个 {required} 请求头，Suture 暂时不能自动帮你写。")),
+                   "所以即使 Key 有效也会一直 401。" + tail),
         "current_value": mask_secret(key),
         "severity": "high",
         "repair_kind": "auto" if auto else "external",
