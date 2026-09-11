@@ -84,7 +84,13 @@ def _split_key(content: str, lineno: int) -> Tuple[str, str]:
             if len(key) >= 2 and key[0] == key[-1] and key[0] in ("'", '"'):
                 key = key[1:-1]
             return key, content[i + 1:].strip()
-    raise MiniYamlError(f"第 {lineno} 行既不是「键: 值」也不是列表项，无法解析：{content!r}")
+    # 报错里**不要**回声这一行的内容：`.dsh/settings.yaml` 里的 headers.Token / apiKeyEnv
+    # 那一行本身就带着 Key 明文（就算不带，用户也可能把 Key 抄在任意一行上）。这条消息
+    # 会一路进 issue 的 detail，最后原样显示在命令行和界面上——而这两处对用户的承诺是
+    # 「Key 只以前 4 位 + 后 4 位出现」。只给行号，让他自己去看那一行。
+    raise MiniYamlError(
+        f"第 {lineno} 行既不是「键: 值」也不是列表项（多半是冒号后面缺了空格），"
+        "这个读取器读不懂这一行")
 
 
 _DASH = object()

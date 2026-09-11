@@ -19,6 +19,7 @@ from .checks import auth_incompatible_issue, auth_requirement_unsatisfiable, blo
 from .harness import ALL_ADAPTERS, get_adapter
 from .harness.base import (
     FIELD_AUTH, FIELD_BASE_URL, FIELD_EXTRA_HEADER, FIELD_MODEL, HarnessConfig, RefuseWrite,
+    mask_secret,
 )
 from .profile import expected_base_url, expected_base_urls, load_profile, model_ids
 
@@ -171,12 +172,43 @@ class Engine:
                 return result
         return result
 
+    def _fresh_configs(self) -> List["HarnessConfig"]:
+        """现读一遍三个 harness 的配置，不吃 self._configs 缓存。
+
+        缓存里可能留着已经被删掉或改过的旧配置。拿它的 Key 去探活，等于用一个
+        用户已经不认的凭据发请求——那个 Key 可能早就作废、也可能根本不该再出现。
+        读不动某个 harness 就跳过：探活还有 profile 自己的兜底，不该因为一个
+        适配器读失败就整轮断掉。"""
+        out: List["HarnessConfig"] = []
+        for harness_id in ("claude_code", "deepseek", "codex"):
+            try:
+                out.append(get_adapter(harness_id).read(
+                    env=self.env, home=self.home, project_dir=self.project_dir,
+                    known_keys=self.profile.get("known_settings_keys", []),
+                    accepted_headers=self.profile.get("auth", {}).get("accepted_headers", [])))
+            except Exception:      # noqa: BLE001
+                continue
+        return out
+
     def _any_known_key(self) -> Optional[str]:
-        for cfg in self._configs.values():
+        for cfg in self._fresh_configs():
             value = cfg.field(FIELD_AUTH).value
             if value:
                 return value
         return None
+
+    def _known_secrets(self) -> List[str]:
+        """本机当前所有"像 Key 的值"，交给 redact_client 在出网前擦自由文本。
+
+        只收主鉴权字段和自定义头——它们才是明文 Key 的落点。缓存里那份也一并带上：
+        多擦一个已经删掉的值没有副作用，漏擦才是问题。"""
+        values: List[str] = []
+        for cfg in list(self._configs.values()) + self._fresh_configs():
+            value = cfg.field(FIELD_AUTH).value
+            if value:
+                values.append(value)
+            values.extend(e.value for e in cfg.extra_auth_headers if e.value)
+        return values
 
     def _probe_model(self) -> str:
         return self.profile.get("probe_model") or ""
@@ -239,7 +271,11 @@ class Engine:
         results: List[Dict[str, Any]] = []
 
         if base_url:
-            for m in self._e2e_candidates(cfg)[:4]:
+            # 不截断候选：口径是「有一个能用就算连通」，而客户端会挨个试它自己配的
+            # 每个模型。只试前 4 个的话，注册了 5 个以上模型的用户一旦把正确型号排在
+            # 后面，就会得到「连不上」——而客户端其实用得挺好。逐个试到成功即止，
+            # 失败时把最后一次留作归因代表。
+            for m in self._e2e_candidates(cfg):
                 r = gateway.send_real_request(base_url, _auth_headers(cfg), m,
                                               suffix=wire["suffix"], style=wire["style"])
                 results.append({"model": m, **_probe_dict(r)})
@@ -337,6 +373,18 @@ class Engine:
         return report
 
     # ---- 单条动作（auto / choice / input）----
+    def _backup(self, adapter, cfg: HarnessConfig, client_id: str):
+        """备份这次要写的配置，返回 BackupManifest。
+
+        单独抽出来是为了让每个调用点都能把「备份」也包进 try：`backup_files` 会
+        `os.makedirs(~/.suture/backups/<时间戳>)`，home 不可写、磁盘满、`~/.suture`
+        被占成普通文件都会让它抛。原先这一步写在 try 外面，异常直接逃到 CLI →
+        用户看到一个英文 Python 栈、rc=1，而同一次写入的其它失败（RefuseWrite/
+        OSError）早就都有中文说明了。"""
+        manifest = fixer.backup_files(adapter.writable_paths(cfg), home=self.home)
+        self._backups[client_id] = manifest
+        return manifest
+
     def apply_action(self, client_id: str, issue: Dict[str, Any],
                      value: Optional[str] = None) -> Dict[str, Any]:
         adapter = get_adapter(client_id)
@@ -353,8 +401,12 @@ class Engine:
                 return {"result": RESULT_MANUAL, "message": "请先输入 Key。",
                         "steps": steps, "backup_dir": None}
             key = str(value).strip()
-            manifest = fixer.backup_files(adapter.writable_paths(cfg), home=self.home)
-            self._backups[client_id] = manifest
+            try:
+                manifest = self._backup(adapter, cfg, client_id)
+            except OSError as exc:
+                return {"result": RESULT_MANUAL,
+                        "message": f"无法备份原配置，这次没有做任何修改：{exc}",
+                        "steps": steps, "backup_dir": None}
             steps.append({"detail": f"已备份原配置到 {manifest.directory}"})
             try:
                 store_steps, _changed, note = adapter.store_key(
@@ -397,8 +449,12 @@ class Engine:
                         "steps": steps, "backup_dir": None}
             fix_value = stripped
         changes = {str(fix_field): str(fix_value)}
-        manifest = fixer.backup_files(adapter.writable_paths(cfg), home=self.home)
-        self._backups[client_id] = manifest
+        try:
+            manifest = self._backup(adapter, cfg, client_id)
+        except OSError as exc:
+            return {"result": RESULT_MANUAL,
+                    "message": f"无法备份原配置，这次没有做任何修改：{exc}",
+                    "steps": steps, "backup_dir": None}
         steps.append({"detail": f"已备份原配置到 {manifest.directory}"})
         try:
             applied = fixer.apply_fixes(adapter, cfg, changes, env=self.env,
@@ -492,8 +548,13 @@ class Engine:
 
         # 先备份、再生成。顺序反了就没有可回滚的起点：generate_minimal_config 是
         # 整文件覆盖，备份如果发生在生成之后，备份里存的就是刚生成的占位文件。
-        manifest = fixer.backup_files(adapter.writable_paths(probe_cfg), home=self.home)
-        self._backups[client_id] = manifest
+        try:
+            manifest = self._backup(adapter, probe_cfg, client_id)
+        except OSError as exc:
+            return {"path": None,
+                    "message": f"无法备份原配置，这次没有做任何修改：{exc}",
+                    "note": None, "steps": [],
+                    "client": asdict(self.assess_client(client_id))}
         steps = [{"detail": f"已备份原配置到 {manifest.directory}"}]
         try:
             path = adapter.generate_minimal_config(
@@ -538,7 +599,8 @@ class Engine:
                 "steps": steps, "client": asdict(client)}
 
 
-def redact_client(payload: Dict[str, Any]) -> Dict[str, Any]:
+def redact_client(payload: Dict[str, Any],
+                  secrets: Optional[List[str]] = None) -> Dict[str, Any]:
     """把一份序列化后的 ClientState 脱敏，返回**副本**（不改传入的那份）。
 
     `fix_value` 可能是原始 Key（补 Token 头、去掉首尾空白这两条修复的载荷都是它）。
@@ -546,31 +608,48 @@ def redact_client(payload: Dict[str, Any]) -> Dict[str, Any]:
     由服务端从自己那份 last_report 里取。所以任何一份要发给浏览器的客户端数据都先
     过这里，Key 在界面/接口返回里永远只以掩码（前 4 + 后 4）的形式出现。
 
-    注意两件事：
+    注意三件事：
     1. 这是"按字段名"脱敏，不是只给某一条路由用。会返回客户端数据的路由有
        四条（/api/check、/api/action、/api/configure、/api/recheck），只堵其中一条
        等于没堵——上一轮就是只在 report_to_dict 里做，另外三条照样漏。
     2. 必须返回副本、**不能就地 pop**：出网的这份 payload 和服务端 last_report 里
        持有的曾经是同一批 dict，就地抹掉会把服务端自己那份也一起抹了——用户点完
        一次修复，同一客户端剩下的「一键修复」按钮就全拿不到值、变成死按钮。
+    3. 光删 `fix_value` 不够：`title` / `detail` / `current_value` 这些是**自由文本**，
+       任何一条把它们拼进消息的代码都可能顺手带上原文（读文件解析失败时把出错那一行
+       抄进说明，就是这么漏的——见 _minimal_yaml 的注释）。所以再按"已知的 Key 值"
+       把整份文本擦一遍：谁传了 `secrets`，它的每个字符串字段里出现的这些值都会被
+       换成掩码。传进来的必须是**真值**，擦除只发生在出网这一刻。
     """
     if not isinstance(payload, dict):
         return payload
+    known = [s for s in (secrets or []) if isinstance(s, str) and len(s) >= 8]
+
+    def scrub(value):
+        if not isinstance(value, str) or not known:
+            return value
+        for s in known:
+            if s in value:
+                value = value.replace(s, mask_secret(s))
+        return value
+
     issues = payload.get("issues")
     if not isinstance(issues, list):
         return dict(payload)
     clean = dict(payload)
     clean["issues"] = [
-        {k: v for k, v in it.items() if k != "fix_value"} if isinstance(it, dict) else it
+        {k: (scrub(v) if k != "fix_value" else v)
+         for k, v in it.items() if k != "fix_value"} if isinstance(it, dict) else it
         for it in issues
     ]
     return clean
 
 
-def report_to_dict(report: Report) -> Dict[str, Any]:
+def report_to_dict(report: Report,
+                   secrets: Optional[List[str]] = None) -> Dict[str, Any]:
     """报告要能直接序列化给界面（出网前统一脱敏，见 redact_client）。"""
     payload = asdict(report)
     clients = payload.get("clients")
     if isinstance(clients, list):
-        payload["clients"] = [redact_client(c) for c in clients]
+        payload["clients"] = [redact_client(c, secrets=secrets) for c in clients]
     return payload

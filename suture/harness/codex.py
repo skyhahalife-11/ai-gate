@@ -17,7 +17,7 @@ import tomllib
 from typing import Any, Dict, List, Optional, Tuple
 
 from .base import (
-    FIELD_AUTH, FIELD_BASE_URL, FIELD_MODEL, FileState, HarnessAdapter,
+    FIELD_AUTH, FIELD_AUTH_ENV, FIELD_BASE_URL, FIELD_MODEL, FileState, HarnessAdapter,
     HarnessConfig, LayerValue, RefuseWrite, build_resolved, resolve_home,
     resolve_project_dir, write_bytes_atomic,
 )
@@ -218,12 +218,15 @@ class CodexAdapter(HarnessAdapter):
             elif logical == FIELD_MODEL:
                 text = _set_top_level(text, "model", value)
                 described.append(f"模型名称 → {value}（写入{target.layer}）")
-            elif logical == FIELD_AUTH:
-                # 鉴权是间接引用，Suture 不把 Key 明文写进 TOML，
-                # 只保证 env_key 指向一个确定的变量名，值由用户在环境里设置。
-                text = _set_provider_key(text, provider_id, "env_key", "AI_GATE_API_KEY")
+            elif logical in (FIELD_AUTH, FIELD_AUTH_ENV):
+                # 鉴权是间接引用，Suture 不把 Key 明文写进 TOML，只保证 env_key
+                # 指向一个确定的变量名，值由用户在环境里设置。
+                # FIELD_AUTH_ENV 是「配置里连变量名都没写」那条修复的落点：它的载荷
+                # 本身就是变量名，所以这里只该按名字写引用，绝不当成 Key 的值用。
+                name = value if logical == FIELD_AUTH_ENV else "AI_GATE_API_KEY"
+                text = _set_provider_key(text, provider_id, "env_key", name)
                 described.append(
-                    f"鉴权引用 → env_key 指向 AI_GATE_API_KEY（写入{target.layer}）；"
+                    f"鉴权引用 → env_key 指向 {name}（写入{target.layer}）；"
                     "Key 本身需要设置成这个名字的环境变量，不写进配置文件"
                 )
 

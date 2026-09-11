@@ -346,9 +346,10 @@ class ClaudeCodeAdapter(HarnessAdapter):
                 ENV_MODEL: model,
             }
         }
-        with open(path, "w", encoding="utf-8") as f:
-            json.dump(data, f, ensure_ascii=False, indent=2)
-            f.write("\n")
+        # 先把内容序列化好再落盘：直接 open(path, "w") 是先截断后写，
+        # 序列化在这之后失败就会把用户原有的 settings.json 清空。
+        body = json.dumps(data, ensure_ascii=False, indent=2) + "\n"
+        write_bytes_atomic(path, body.encode("utf-8"))
         try:
             os.chmod(path, 0o600)
         except OSError:

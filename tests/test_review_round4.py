@@ -253,7 +253,9 @@ class TestServerRoutesHaveGuards(unittest.TestCase):
                 self.assertEqual(sorted(v[0] for v in results.values()), [200, 409],
                                  "两个安装请求没有被互斥住")
                 blocked = next(v[1] for v in results.values() if v[0] == 409)
-                self.assertIn("已经有一个安装在进行中", blocked.get("message", ""))
+                # 必须落在 error 这个键上：前端 api() 是 throw new Error(data.error || "请求失败")，
+                # 写在 message 里会被当成"没有说明"、换成一句笼统的「请求失败」。
+                self.assertIn("已经有一个安装在进行中", blocked.get("error", ""))
             finally:
                 httpd.shutdown()
 

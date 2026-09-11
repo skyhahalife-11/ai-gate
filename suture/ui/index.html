@@ -197,17 +197,30 @@
 <script>
 const TOKEN = "__SUTURE_TOKEN__";
 const $ = (id) => document.getElementById(id);
-const STATE = { models: [], clients: [] };      // /api/state 的静态信息
+const STATE = { models: [], clients: [], stateError: "" };   // /api/state 的静态信息
 let lastReport = null;                          // 最近一次 /api/check 的报告
 
 async function api(path, body) {
-  const res = await fetch(path, {
-    method: body ? "POST" : "GET",
-    headers: { "Content-Type": "application/json", "X-Suture-Token": TOKEN },
-    body: body ? JSON.stringify(body) : undefined,
-  });
-  const data = await res.json();
-  if (!res.ok) throw new Error(data.error || "请求失败");
+  let res;
+  try {
+    res = await fetch(path, {
+      method: body ? "POST" : "GET",
+      headers: { "Content-Type": "application/json", "X-Suture-Token": TOKEN },
+      body: body ? JSON.stringify(body) : undefined,
+    });
+  } catch (_) {
+    // fetch 本身抛错 = 请求根本没发出去（服务退出、窗口被关掉、断网）。
+    // 不包的话用户看到的是英文的 "Failed to fetch"。
+    throw new Error("本地服务已退出，请重新运行 Suture。");
+  }
+  let data = {};
+  try {
+    data = await res.json();
+  } catch (_) {
+    data = {};                      // 非 JSON 响应（比如 403 的纯文本）
+  }
+  if (res.status === 403) throw new Error("页面已过期，请重新打开 Suture。");
+  if (!res.ok) throw new Error(data.error || `请求失败（HTTP ${res.status}）`);
   return data;
 }
 
@@ -593,6 +606,12 @@ function installCard(c) {
 
 function renderInstall() {
   const host = $("installList");
+  if (STATE.stateError && !STATE.clients.length) {
+    // 状态没读到、列表也是空的，否则渲染出来就是一片空白：页头一句「加载中…」、
+    // 下面什么都没有，用户既不知道出了什么事也不知道该干嘛。
+    host.replaceChildren(el("section", "card err", STATE.stateError));
+    return;
+  }
   host.replaceChildren(...STATE.clients.map(installCard));
 }
 
@@ -637,7 +656,14 @@ async function reloadState() {
     STATE.models = s.models || [];
     STATE.clients = s.clients || [];
     $("sub").textContent = `客户端与 ${s.gateway_name || "AI Gate"} 的连接检查`;
-  } catch (_) { /* 忽略，保留已有信息 */ }
+    STATE.stateError = "";
+  } catch (e) {
+    // 不能空 catch：客户端列表和模型清单都来自这条路由，吞掉异常的结果是整页
+    // 空白 + 页头永远停在「加载中…」，用户拿不到任何提示（服务端那边已经改成
+    // 中文 500 了，这里要把它接住并显示出来）。
+    STATE.stateError = String((e && e.message) || e);
+    $("sub").textContent = STATE.stateError;
+  }
 }
 
 reloadState();

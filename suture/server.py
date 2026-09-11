@@ -172,12 +172,22 @@ class Handler(BaseHTTPRequestHandler):
             # 客户端、或刷新后的同一个）直接如实告知，不再并发跑第二个安装——
             # 两个 npm install -g 同时写同一个全局前缀，结果不可预期。
             if not self.state.install_lock.acquire(blocking=False):
-                self._send_json({"ok": False, "ran": False, "timed_out": False, "output": "",
-                                 "message": "已经有一个安装在进行中，请等它结束后再试。"},
+                # 必须用 error 这个键：前端 api() 是 `throw new Error(data.error || "请求失败")`，
+                # 写成 message 会让这句中文说明被吞掉，用户只看到一条笼统的「安装失败」。
+                self._send_json({"error": "已经有一个安装在进行中，请等它结束后再试。",
+                                 "ran": False, "timed_out": False, "output": ""},
                                 409)
                 return
             try:
-                result = installer.run_install(adapter, env=self.state.engine.env)
+                try:
+                    result = installer.run_install(adapter, env=self.state.engine.env)
+                except Exception as exc:      # noqa: BLE001
+                    # 跟其它路由一个口径：任何没预料到的异常都要变成一句中文 500，
+                    # 不能让它逃出去把连接硬关掉（前端只会看到「安装失败」四个字，
+                    # 拿不到半点线索）。installer 内部已经兜了子进程那部分，这里是
+                    # 兜它自己（比如覆盖命令的引号不成对）。
+                    self._send_json({"error": f"安装没能启动：{exc}"}, 500)
+                    return
             finally:
                 self.state.install_lock.release()
             self._send_json(result)
@@ -196,7 +206,7 @@ class Handler(BaseHTTPRequestHandler):
                     self._send_json({"error": f"检查失败：{exc}"}, 500)
                     return
                 self.state.last_report = report
-                self._send_json(E.report_to_dict(report))
+                self._send_json(E.report_to_dict(report, secrets=eng._known_secrets()))
                 return
 
             if path == "/api/action":
@@ -220,7 +230,7 @@ class Handler(BaseHTTPRequestHandler):
                 # 否则用户紧接着点新出现的 issue 会在旧报告里找不到而报 409。
                 if result.get("client"):
                     self._record_client(result["client"])
-                self._send_json(_redact_result(result))
+                self._send_json(_redact_result(result, eng._known_secrets()))
                 return
 
             if path == "/api/recheck":
@@ -234,7 +244,8 @@ class Handler(BaseHTTPRequestHandler):
                     self._send_json({"error": f"重新检查失败：{exc}"}, 500)
                     return
                 self._record_client(asdict(client))
-                self._send_json({"client": E.redact_client(asdict(client))})
+                self._send_json({"client": E.redact_client(asdict(client),
+                                                          secrets=eng._known_secrets())})
                 return
 
             if path == "/api/configure":
@@ -250,20 +261,20 @@ class Handler(BaseHTTPRequestHandler):
                     return
                 if result.get("client"):
                     self._record_client(result["client"])
-                self._send_json(_redact_result(result))
+                self._send_json(_redact_result(result, eng._known_secrets()))
                 return
 
         self._send_json({"error": "not found"}, 404)
 
 
-def _redact_result(result: Dict[str, Any]) -> Dict[str, Any]:
+def _redact_result(result: Dict[str, Any], secrets=None) -> Dict[str, Any]:
     """apply_action / configure_client 的返回值里带着一份客户端数据，
     出网前统一脱敏（服务端自己的 last_report 仍保留原始值，点「修复」时要用）。
 
     脱敏返回的是副本，所以这里必须把结果**替换**掉，不能指望就地改生效——
     就地改会连 last_report 里那份一起抹掉（见 engine.redact_client 的说明）。"""
     if isinstance(result, dict) and isinstance(result.get("client"), dict):
-        result["client"] = E.redact_client(result["client"])
+        result["client"] = E.redact_client(result["client"], secrets=secrets)
     return result
 
 

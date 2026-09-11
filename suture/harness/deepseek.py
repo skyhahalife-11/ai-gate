@@ -16,9 +16,9 @@ from typing import Any, Dict, List, Optional, Tuple
 
 from . import _minimal_yaml as yaml
 from .base import (
-    ExtraAuthHeader, FIELD_AUTH, FIELD_BASE_URL, FIELD_EXTRA_HEADER, FIELD_MODEL,
-    FileState, HarnessAdapter, HarnessConfig, LayerValue, RefuseWrite, build_resolved,
-    resolve_home, resolve_project_dir, write_bytes_atomic,
+    ExtraAuthHeader, FIELD_AUTH, FIELD_AUTH_ENV, FIELD_BASE_URL, FIELD_EXTRA_HEADER,
+    FIELD_MODEL, FileState, HarnessAdapter, HarnessConfig, LayerValue, RefuseWrite,
+    build_resolved, resolve_home, resolve_project_dir, write_bytes_atomic,
 )
 
 PLUGIN_FULL = "@deepseek-ai/dsh-llm-pi-ai"
@@ -406,6 +406,15 @@ class DeepSeekHarnessAdapter(HarnessAdapter):
                 described.append(
                     f"鉴权 → apiKeyEnv 指向 AI_GATE_API_KEY，并把 Key 写进 providers.{route} 的 "
                     "headers.Token（AI Gate 只从 Token 头读 Key；Key 同时存一份在 .credentials.yaml）")
+            elif logical == FIELD_AUTH_ENV:
+                # 只补「去哪个变量取 Key」这一个引用。载荷是变量**名字**，不是 Key，
+                # 所以绝不能往 headers.Token 里写——那样客户端会拿字面量
+                # "AI_GATE_API_KEY" 当 Token 发出去（实测过）。
+                rc["apiKeyEnv"] = value
+                described.append(
+                    f"鉴权引用 → apiKeyEnv 指向 {value}（写入用户层 settings.yaml 的 "
+                    f"providers.{route}）；Key 本身不写进配置文件，由环境变量或 "
+                    ".credentials.yaml 提供")
             elif logical == FIELD_EXTRA_HEADER:
                 headers = dict(rc.get("headers") or {})
                 headers["Token"] = value
@@ -455,12 +464,16 @@ class DeepSeekHarnessAdapter(HarnessAdapter):
                 }
             }
         }
-        with open(path, "w", encoding="utf-8") as f:
-            f.write(yaml.dump(data))
+        # 先把内容序列化好再落盘。写成 f.write(yaml.dump(data)) 更危险：dump 在
+        # write 的实参里求值，文件已经被 open(..., "w") 截断了才轮到它抛错。
+        write_bytes_atomic(path, yaml.dump(data).encode("utf-8"))
         creds = os.path.join(hh, ".credentials.yaml")
         if not os.path.exists(creds):
-            with open(creds, "w", encoding="utf-8") as f:
-                f.write(yaml.dump({"version": 1, "refs": {"AI_GATE_API_KEY": "请替换为网关后台生成的 Key"}}))
+            write_bytes_atomic(
+                creds,
+                yaml.dump({"version": 1,
+                           "refs": {"AI_GATE_API_KEY": "请替换为网关后台生成的 Key"}}
+                          ).encode("utf-8"))
             try:
                 os.chmod(creds, 0o600)
             except OSError:

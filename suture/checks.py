@@ -11,8 +11,8 @@ from typing import Any, Dict, List, Optional, Tuple
 
 from .harness import get_adapter
 from .harness.base import (
-    FIELD_AUTH, FIELD_BASE_URL, FIELD_EXTRA_HEADER, FIELD_MODEL, HarnessConfig,
-    mask_secret,
+    FIELD_AUTH, FIELD_AUTH_ENV, FIELD_BASE_URL, FIELD_EXTRA_HEADER, FIELD_MODEL,
+    HarnessConfig, mask_secret,
 )
 from .profile import expected_base_url, expected_base_urls, model_ids, model_index
 
@@ -191,7 +191,7 @@ def check_auth(cfg: HarnessConfig, profile: Dict[str, Any]) -> List[Finding]:
                 key="auth-ref", label="鉴权引用", ok=False,
                 detail="配置里没有写明去哪个环境变量取 Key。",
                 suggested_value="AI_GATE_API_KEY",
-                fixable=FIXABLE_YES, fix_field=FIELD_AUTH, fix_value="AI_GATE_API_KEY"))
+                fixable=FIXABLE_YES, fix_field=FIELD_AUTH_ENV, fix_value="AI_GATE_API_KEY"))
         elif not cfg.auth_env_resolved:
             out.append(Finding(
                 key="auth-ref", label="鉴权引用", ok=False,
@@ -623,10 +623,13 @@ def finding_to_issue(f: Finding, cfg: HarnessConfig) -> Dict[str, Any]:
             cur["fix_value"] = f.fix_value
     elif key == "auth-ref":
         if f.fixable == FIXABLE_YES:
-            if _cannot_write(cfg, [FIELD_AUTH]):
+            # 这条只写「变量名」这一个引用（FIELD_AUTH_ENV），不碰凭据文件，
+            # 所以「写不写得进去」要按这个字段问，而不是按 FIELD_AUTH——后者会
+            # 把一份读不懂的 .credentials.yaml 也算进来，白封掉一个能用的按钮。
+            if _cannot_write(cfg, [FIELD_AUTH_ENV]):
                 cur["title"] = "鉴权引用没写好（当前情况下改配置文件不生效）"
                 cur["repair_kind"] = "external"
-                cur["detail"] = f.detail + " " + _why_cannot_write(cfg, FIELD_AUTH)
+                cur["detail"] = f.detail + " " + _why_cannot_write(cfg, FIELD_AUTH_ENV)
             else:
                 cur["title"] = "鉴权引用没写好"
                 cur["repair_kind"] = "auto"

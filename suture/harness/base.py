@@ -19,6 +19,12 @@ FIELD_MODEL = "model"
 # （deepseek → providers.<route>.headers.Token；claude_code → env 的
 #  ANTHROPIC_CUSTOM_HEADERS 里补一行 Token）。只由网关 required_header 判定触发。
 FIELD_EXTRA_HEADER = "extra_auth_header"
+# 第五个：间接引用式鉴权（deepseek 的 apiKeyEnv / codex 的 env_key）里，配置**连变量名
+# 都没写**。这时要修的只是那个引用本身——写进去的是变量**名字**，不是 Key 的值。
+# 必须跟 FIELD_AUTH 分开：FIELD_AUTH 的载荷是真正的 Key 明文（存 Key / 补头都写它），
+# 而这条的载荷是 "AI_GATE_API_KEY" 这种名字。混用会把变量名当成凭据写进请求头，
+# 客户端就会拿着字面量 "AI_GATE_API_KEY" 去当 Token 发（实测过）。
+FIELD_AUTH_ENV = "auth_env"
 LOGICAL_FIELDS = [FIELD_BASE_URL, FIELD_AUTH, FIELD_MODEL, FIELD_EXTRA_HEADER]
 
 

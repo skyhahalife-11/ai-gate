@@ -13,8 +13,11 @@ Key 或选模型的给输入框 / 候选列表，处理完再测。另有一个�
 ```bash
 python3 main.py                  # 图形界面
 python3 main.py --cli            # 命令行
-python3 main.py --cli --no-fix   # 只检测不修改任何文件
+python3 main.py --cli --no-fix   # 不修改任何配置文件
 ```
+
+`--no-fix` 只保证 **Suture 自己**一个字节都不写；它仍会让客户端跑一次自证
+（`claude -p` / `codex exec`），那一步由客户端自己写状态目录、也会消耗一次调用。
 
 图形界面会优先用系统自带的 WebView 开一个应用窗口；初始化不成功（主要是 Linux
 上没装 WebKitGTK）就退回默认浏览器，界面内容一样。设置 `SUTURE_NO_BROWSER=1`

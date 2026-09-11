@@ -33,7 +33,9 @@ def run(argv: Optional[List[str]] = None) -> int:
     parser.add_argument("--home", help="覆盖 HOME（测试用）")
     parser.add_argument("--yes", action="store_true",
                         help="连通失败时可自动修的原因直接修，不交互确认")
-    parser.add_argument("--no-fix", action="store_true", help="只检测，不修改任何文件")
+    parser.add_argument("--no-fix", action="store_true",
+                        help="不修改配置文件。注意 Suture 自己一个字节都不写，"
+                             "但仍会调用客户端做一次自证（客户端会写它自己的状态目录）")
     parser.add_argument("--gui", action="store_true", help="打开图形界面")
     args = parser.parse_args(argv)
 
@@ -41,7 +43,14 @@ def run(argv: Optional[List[str]] = None) -> int:
         from .shell import launch
         return launch(profile_path=args.profile, project_dir=args.project_dir)
 
-    eng = E.Engine(profile_path=args.profile, home=args.home, project_dir=args.project_dir)
+    try:
+        eng = E.Engine(profile_path=args.profile, home=args.home, project_dir=args.project_dir)
+    except (OSError, ValueError) as exc:
+        # 规则文件读不出来（路径不存在、不是 JSON、权限不对）。GUI 侧有中文 500
+        # 兜底，这里是全仓唯一没有兜底的入口——不包的话用户看到的是一个英文
+        # Python 栈，连"哪个文件出了问题"都得自己从 traceback 里找。
+        print(_c(f"读不到网关规则文件：{exc}", RED), file=sys.stderr)
+        return 1
     print(_c("Suture · AI Gate 连通体检", BOLD))
     print(_c(f"规则来源：{eng.profile_source}", DIM))
     print()
@@ -78,12 +87,24 @@ def run(argv: Optional[List[str]] = None) -> int:
                 else:
                     ok = True if args.yes else None
                     if not args.yes:
-                        ans = input(f"    发现 {len(auto)} 项可以自动修复的原因，是否处理？会先备份 [y/N] ")
-                        ok = ans.strip().lower() == "y"
+                        try:
+                            ans = input(f"    发现 {len(auto)} 项可以自动修复的原因，是否处理？会先备份 [y/N] ")
+                            ok = ans.strip().lower() == "y"
+                        except (EOFError, RuntimeError):
+                            # 不在终端里跑（`< NUL`、stdin 被管道接走、打包后无控制台）。
+                            # 不接住就直接崩在这儿，而 check-only.bat 那种"跑一遍看结论"
+                            # 的用法正好会撞上。当作"不修"继续，并说明怎么让它不必问。
+                            print(_c("    当前没有可用的输入，已跳过自动修复"
+                                     "（加 --yes 可直接修）。", YELLOW))
+                            ok = False
                     if ok:
                         for it in auto:
                             res = eng.apply_action(client.client_id, it)
-                            changed = True
+                            # 只有真改动了才算 changed。无条件置位会让"所有修复都失败"
+                            # 也走到下面那句「已按可自动修复的原因改完」，与上面刚打印的
+                            # 失败说明自相矛盾。
+                            if res.get("result") in (E.RESULT_FIXED, E.RESULT_CHANGED):
+                                changed = True
                             for s in res.get("steps", []):
                                 print(f"      · {s['detail']}")
                             print(_c(f"      {res['message']}", GREEN if res.get("result") == E.RESULT_FIXED else YELLOW))
